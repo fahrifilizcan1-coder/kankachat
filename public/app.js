@@ -18,6 +18,11 @@ const state = {
     joined: false,
     joining: false,
     muted: false,
+    cameraEnabled: false,
+    screenSharing: false,
+    cameraStream: null,
+    screenStream: null,
+    videoCollapsed: false,
     peers: new Map(),
     participants: new Map(),
   },
@@ -77,8 +82,14 @@ const elements = {
   joinVoiceButton: document.querySelector("#join-voice-button"),
   muteVoiceButton: document.querySelector("#mute-voice-button"),
   leaveVoiceButton: document.querySelector("#leave-voice-button"),
+  toggleCameraButton: document.querySelector("#toggle-camera-button"),
+  shareScreenButton: document.querySelector("#share-screen-button"),
   voiceStatus: document.querySelector("#voice-status"),
   voiceAudioRoot: document.querySelector("#voice-audio-root"),
+  videoStage: document.querySelector("#video-stage"),
+  videoStageStatus: document.querySelector("#video-stage-status"),
+  videoGrid: document.querySelector("#video-grid"),
+  collapseVideoButton: document.querySelector("#collapse-video-button"),
   fileButton: document.querySelector("#file-button"),
   fileInput: document.querySelector("#file-input"),
   profileModal: document.querySelector("#profile-modal"),
@@ -207,7 +218,13 @@ function bindEvents() {
   }, "#toggle-members");
   on(elements.joinVoiceButton, "click", joinVoice, "#join-voice-button");
   on(elements.muteVoiceButton, "click", toggleVoiceMute, "#mute-voice-button");
+  on(elements.toggleCameraButton, "click", toggleCamera, "#toggle-camera-button");
+  on(elements.shareScreenButton, "click", toggleScreenShare, "#share-screen-button");
   on(elements.leaveVoiceButton, "click", () => leaveVoice(), "#leave-voice-button");
+  on(elements.collapseVideoButton, "click", () => {
+    state.voice.videoCollapsed = !state.voice.videoCollapsed;
+    renderVideoStage();
+  }, "#collapse-video-button");
   on(
     elements.googleFallbackButton,
     "click",
@@ -1040,12 +1057,15 @@ async function handleVoiceSocketMessage(event) {
         peerId: message.peerId,
         user: state.me,
         muted: false,
+        cameraEnabled: state.voice.cameraEnabled,
+        screenSharing: state.voice.screenSharing,
       });
       for (const peer of message.peers || []) {
         state.voice.participants.set(peer.peerId, peer);
       }
       renderVoiceControls();
       renderMembers();
+      renderVideoStage();
 
       for (const peer of message.peers || []) {
         await createVoiceOffer(peer);
@@ -1059,6 +1079,7 @@ async function handleVoiceSocketMessage(event) {
       state.voice.participants.set(message.peer.peerId, message.peer);
       renderVoiceControls();
       renderMembers();
+      renderVideoStage();
       return;
     }
     if (message.type === "voice-peer-left") {
@@ -1066,6 +1087,7 @@ async function handleVoiceSocketMessage(event) {
       removeVoicePeer(message.peerId);
       renderVoiceControls();
       renderMembers();
+      renderVideoStage();
       return;
     }
     if (message.type === "voice-presence") {
@@ -1074,12 +1096,24 @@ async function handleVoiceSocketMessage(event) {
       );
       renderVoiceControls();
       renderMembers();
+      renderVideoStage();
       return;
     }
     if (message.type === "voice-peer-muted") {
       const peer = state.voice.participants.get(message.peerId);
       if (peer) peer.muted = Boolean(message.muted);
       renderMembers();
+      renderVideoStage();
+      return;
+    }
+    if (message.type === "voice-peer-media") {
+      const peer = state.voice.participants.get(message.peerId);
+      if (peer) {
+        peer.cameraEnabled = Boolean(message.cameraEnabled);
+        peer.screenSharing = Boolean(message.screenSharing);
+      }
+      renderMembers();
+      renderVideoStage();
       return;
     }
     if (message.type === "webrtc-offer") {
@@ -1124,11 +1158,18 @@ function ensureVoicePeer(peerId, user) {
     connection,
     pendingCandidates: [],
     audio: null,
+    remoteStream: new MediaStream(),
+    videoSender: null,
   };
   state.voice.peers.set(peerId, peer);
 
   for (const track of state.voice.localStream?.getTracks() || []) {
     connection.addTrack(track, state.voice.localStream);
+  }
+  const outgoingVideoTrack = currentOutgoingVideoTrack();
+  if (outgoingVideoTrack) {
+    const outgoingStream = currentOutgoingVideoStream();
+    peer.videoSender = connection.addTrack(outgoingVideoTrack, outgoingStream);
   }
 
   connection.addEventListener("icecandidate", (event) => {
@@ -1141,6 +1182,17 @@ function ensureVoicePeer(peerId, user) {
   });
 
   connection.addEventListener("track", (event) => {
+    if (event.track.kind === "video") {
+      for (const oldTrack of peer.remoteStream.getVideoTracks()) {
+        peer.remoteStream.removeTrack(oldTrack);
+      }
+      peer.remoteStream.addTrack(event.track);
+      event.track.addEventListener("unmute", renderVideoStage);
+      event.track.addEventListener("mute", renderVideoStage);
+      event.track.addEventListener("ended", renderVideoStage, { once: true });
+      renderVideoStage();
+      return;
+    }
     if (!peer.audio) {
       peer.audio = document.createElement("audio");
       peer.audio.autoplay = true;
@@ -1198,6 +1250,7 @@ function removeVoicePeer(peerId) {
   peer.connection.close();
   peer.audio?.remove();
   state.voice.peers.delete(peerId);
+  renderVideoStage();
 }
 
 function closeAllVoicePeers() {
@@ -1205,6 +1258,237 @@ function closeAllVoicePeers() {
     removeVoicePeer(peerId);
   }
   elements.voiceAudioRoot.innerHTML = "";
+}
+
+function currentOutgoingVideoTrack() {
+  if (state.voice.screenSharing) {
+    return state.voice.screenStream?.getVideoTracks()[0] || null;
+  }
+  if (state.voice.cameraEnabled) {
+    return state.voice.cameraStream?.getVideoTracks()[0] || null;
+  }
+  return null;
+}
+
+function currentOutgoingVideoStream() {
+  if (state.voice.screenSharing) return state.voice.screenStream;
+  if (state.voice.cameraEnabled) return state.voice.cameraStream;
+  return null;
+}
+
+async function replaceOutgoingVideoTrack(track) {
+  for (const peer of state.voice.peers.values()) {
+    if (peer.videoSender) {
+      await peer.videoSender.replaceTrack(track || null);
+      continue;
+    }
+    if (!track) continue;
+    peer.videoSender = peer.connection.addTrack(track, currentOutgoingVideoStream());
+    await createVoiceOffer(peer);
+  }
+}
+
+function updateLocalMediaState() {
+  const participant = state.voice.participants.get(state.voice.selfPeerId);
+  if (participant) {
+    participant.cameraEnabled = state.voice.cameraEnabled;
+    participant.screenSharing = state.voice.screenSharing;
+  }
+  sendVoiceSocket({
+    type: "voice-media-state",
+    cameraEnabled: state.voice.cameraEnabled,
+    screenSharing: state.voice.screenSharing,
+  });
+  renderVoiceControls();
+  renderMembers();
+  renderVideoStage();
+}
+
+async function toggleCamera() {
+  if (!state.voice.joined) return;
+  if (state.voice.cameraEnabled) {
+    await stopCamera();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showToast("Tarayıcın kamera kullanımını desteklemiyor.", "error");
+    return;
+  }
+
+  elements.toggleCameraButton.disabled = true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: "user",
+      },
+    });
+    const track = stream.getVideoTracks()[0];
+    if (!track || !state.voice.joined) {
+      for (const mediaTrack of stream.getTracks()) mediaTrack.stop();
+      return;
+    }
+    state.voice.cameraStream = stream;
+    state.voice.cameraEnabled = true;
+    track.addEventListener("ended", handleCameraEnded, { once: true });
+    if (!state.voice.screenSharing) await replaceOutgoingVideoTrack(track);
+    updateLocalMediaState();
+  } catch (error) {
+    const denied = error?.name === "NotAllowedError";
+    showToast(
+      denied ? "Kamerayı açmak için kamera izni gerekiyor." : "Kamera açılamadı.",
+      "error",
+    );
+  } finally {
+    elements.toggleCameraButton.disabled = false;
+  }
+}
+
+async function handleCameraEnded() {
+  if (!state.voice.cameraEnabled) return;
+  state.voice.cameraEnabled = false;
+  state.voice.cameraStream = null;
+  if (!state.voice.screenSharing) await replaceOutgoingVideoTrack(null);
+  updateLocalMediaState();
+}
+
+async function stopCamera() {
+  const stream = state.voice.cameraStream;
+  state.voice.cameraStream = null;
+  state.voice.cameraEnabled = false;
+  for (const track of stream?.getTracks() || []) {
+    track.removeEventListener("ended", handleCameraEnded);
+    track.stop();
+  }
+  if (!state.voice.screenSharing) await replaceOutgoingVideoTrack(null);
+  updateLocalMediaState();
+}
+
+async function toggleScreenShare() {
+  if (!state.voice.joined) return;
+  if (state.voice.screenSharing) {
+    await stopScreenShare();
+    return;
+  }
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    showToast("Tarayıcın ekran paylaşımını desteklemiyor.", "error");
+    return;
+  }
+
+  elements.shareScreenButton.disabled = true;
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 24, max: 30 } },
+      audio: false,
+    });
+    const track = stream.getVideoTracks()[0];
+    if (!track || !state.voice.joined) {
+      for (const mediaTrack of stream.getTracks()) mediaTrack.stop();
+      return;
+    }
+    state.voice.screenStream = stream;
+    state.voice.screenSharing = true;
+    track.addEventListener("ended", handleScreenShareEnded, { once: true });
+    await replaceOutgoingVideoTrack(track);
+    updateLocalMediaState();
+  } catch (error) {
+    if (error?.name !== "NotAllowedError") {
+      showToast("Ekran paylaşımı başlatılamadı.", "error");
+    }
+  } finally {
+    elements.shareScreenButton.disabled = false;
+  }
+}
+
+function handleScreenShareEnded() {
+  stopScreenShare({ trackAlreadyEnded: true }).catch(() => {});
+}
+
+async function stopScreenShare({ trackAlreadyEnded = false } = {}) {
+  if (!state.voice.screenSharing && !state.voice.screenStream) return;
+  const stream = state.voice.screenStream;
+  state.voice.screenStream = null;
+  state.voice.screenSharing = false;
+  for (const track of stream?.getTracks() || []) {
+    track.removeEventListener("ended", handleScreenShareEnded);
+    if (!trackAlreadyEnded) track.stop();
+  }
+  await replaceOutgoingVideoTrack(
+    state.voice.cameraEnabled
+      ? state.voice.cameraStream?.getVideoTracks()[0] || null
+      : null,
+  );
+  updateLocalMediaState();
+}
+
+function renderVideoStage() {
+  const activeInRoom = state.voice.joined && state.voice.roomId === state.activeRoomId;
+  elements.videoStage.classList.toggle("hidden", !activeInRoom);
+  elements.videoStage.classList.toggle("collapsed", state.voice.videoCollapsed);
+  elements.collapseVideoButton.setAttribute(
+    "aria-label",
+    state.voice.videoCollapsed ? "Görüntüleri büyüt" : "Görüntüleri küçült",
+  );
+  if (!activeInRoom) {
+    elements.videoGrid.innerHTML = "";
+    return;
+  }
+
+  const participants = [...state.voice.participants.values()];
+  elements.videoStageStatus.textContent = `${participants.length} katılımcı`;
+  elements.videoGrid.innerHTML = "";
+
+  for (const participant of participants) {
+    const isLocal = participant.peerId === state.voice.selfPeerId;
+    const peer = isLocal ? null : state.voice.peers.get(participant.peerId);
+    const stream = isLocal
+      ? state.voice.screenSharing
+        ? state.voice.screenStream
+        : state.voice.cameraStream
+      : peer?.remoteStream;
+    const mediaActive = participant.screenSharing || participant.cameraEnabled;
+    const tile = document.createElement("article");
+    tile.className = `video-tile${participant.screenSharing ? " sharing-screen" : ""}`;
+
+    if (mediaActive && stream?.getVideoTracks().length) {
+      const video = document.createElement("video");
+      video.autoplay = true;
+      video.playsInline = true;
+      video.muted = true;
+      video.srcObject = stream;
+      video.className = isLocal && !participant.screenSharing ? "mirrored" : "";
+      video.addEventListener("loadedmetadata", () => video.play().catch(() => {}), {
+        once: true,
+      });
+      tile.append(video);
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.className = "video-placeholder";
+      const avatar = document.createElement("div");
+      avatar.className = "avatar video-avatar";
+      renderAvatar(avatar, participant.user);
+      const message = document.createElement("span");
+      message.textContent = participant.cameraEnabled ? "Görüntü bekleniyor" : "Kamera kapalı";
+      placeholder.append(avatar, message);
+      tile.append(placeholder);
+    }
+
+    const footer = document.createElement("div");
+    footer.className = "video-tile-footer";
+    const name = document.createElement("strong");
+    name.textContent = isLocal ? `${participant.user.name} (sen)` : participant.user.name;
+    const stateLabel = document.createElement("span");
+    stateLabel.textContent = participant.screenSharing
+      ? "Ekran paylaşıyor"
+      : participant.muted
+        ? "Mikrofon kapalı"
+        : "Mikrofon açık";
+    footer.append(name, stateLabel);
+    tile.append(footer);
+    elements.videoGrid.append(tile);
+  }
 }
 
 function toggleVoiceMute() {
@@ -1229,7 +1513,15 @@ async function leaveVoice({ silent = false } = {}) {
 }
 
 function cleanupVoiceMedia() {
+  const cameraStream = state.voice.cameraStream;
+  const screenStream = state.voice.screenStream;
+  state.voice.cameraStream = null;
+  state.voice.screenStream = null;
+  state.voice.cameraEnabled = false;
+  state.voice.screenSharing = false;
   for (const track of state.voice.localStream?.getTracks() || []) track.stop();
+  for (const track of cameraStream?.getTracks() || []) track.stop();
+  for (const track of screenStream?.getTracks() || []) track.stop();
   state.voice.localStream = null;
   closeAllVoicePeers();
   state.voice.participants.clear();
@@ -1239,6 +1531,7 @@ function cleanupVoiceMedia() {
   state.voice.joining = false;
   state.voice.muted = false;
   renderVoiceControls();
+  renderVideoStage();
   if (state.me) renderMembers();
 }
 
@@ -1255,8 +1548,34 @@ function renderVoiceControls() {
     ? "Bağlanıyor..."
     : "Sese Katıl";
   elements.muteVoiceButton.classList.toggle("hidden", !activeInRoom);
+  elements.toggleCameraButton.classList.toggle("hidden", !activeInRoom);
+  elements.shareScreenButton.classList.toggle("hidden", !activeInRoom);
   elements.leaveVoiceButton.classList.toggle("hidden", !activeInRoom);
   elements.muteVoiceButton.classList.toggle("active", activeInRoom && !state.voice.muted);
+  elements.toggleCameraButton.classList.toggle(
+    "active",
+    activeInRoom && state.voice.cameraEnabled,
+  );
+  elements.shareScreenButton.classList.toggle(
+    "sharing",
+    activeInRoom && state.voice.screenSharing,
+  );
+  elements.toggleCameraButton.querySelector("span").textContent = state.voice.cameraEnabled
+    ? "Kamerayı Kapat"
+    : "Kamerayı Aç";
+  elements.toggleCameraButton.setAttribute(
+    "aria-label",
+    state.voice.cameraEnabled ? "Kamerayı kapat" : "Kamerayı aç",
+  );
+  elements.shareScreenButton.querySelector("span").textContent = state.voice.screenSharing
+    ? "Paylaşımı Durdur"
+    : "Ekranı Paylaş";
+  elements.shareScreenButton.setAttribute(
+    "aria-label",
+    state.voice.screenSharing
+      ? "Ekran paylaşımını durdur"
+      : "Ekran paylaşımını başlat",
+  );
   elements.muteVoiceButton.querySelector("span").textContent = state.voice.muted
     ? "Mikrofonu Aç"
     : "Mikrofonu Kapat";

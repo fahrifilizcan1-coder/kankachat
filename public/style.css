@@ -909,6 +909,160 @@ input:focus {
     #111319;
 }
 
+.video-stage {
+  flex: 0 0 auto;
+  margin: 14px clamp(18px, 3.2vw, 44px) 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(10, 12, 17, 0.78);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.18);
+}
+
+.video-stage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 10px;
+}
+
+.video-stage-head > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.video-stage-head strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.video-stage-head span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.video-collapse-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--muted-strong);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-lighter);
+  cursor: pointer;
+}
+
+.video-collapse-button svg {
+  width: 16px;
+  transition: transform 0.2s;
+}
+
+.video-stage.collapsed .video-collapse-button svg {
+  transform: rotate(180deg);
+}
+
+.video-stage.collapsed .video-stage-head {
+  padding-bottom: 0;
+}
+
+.video-stage.collapsed .video-grid {
+  display: none;
+}
+
+.video-grid {
+  display: grid;
+  overflow-y: auto;
+  max-height: min(42vh, 410px);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 9px;
+}
+
+.video-tile {
+  position: relative;
+  overflow: hidden;
+  min-height: 128px;
+  aspect-ratio: 16 / 10;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: #090b10;
+}
+
+.video-tile.sharing-screen {
+  grid-column: 1 / -1;
+  aspect-ratio: 16 / 9;
+}
+
+.video-tile video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #090b10;
+}
+
+.video-tile.sharing-screen video {
+  object-fit: contain;
+}
+
+.video-tile video.mirrored {
+  transform: scaleX(-1);
+}
+
+.video-placeholder {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: var(--muted);
+  background:
+    radial-gradient(circle at center, rgba(255, 202, 75, 0.08), transparent 48%),
+    #10131a;
+  font-size: 9px;
+}
+
+.video-avatar {
+  width: 52px;
+  height: 52px;
+  font-size: 16px;
+}
+
+.video-tile-footer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 22px 10px 8px;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.82));
+}
+
+.video-tile-footer strong,
+.video-tile-footer span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-tile-footer strong {
+  font-size: 10px;
+}
+
+.video-tile-footer span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 8px;
+}
+
 .messages {
   overflow-y: auto;
   flex: 1;
@@ -1175,6 +1329,12 @@ input:focus {
   background: var(--green);
 }
 
+.composer-voice-button.sharing {
+  color: #101713;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
 .composer-voice-button.danger {
   width: 37px;
   padding: 0;
@@ -1250,6 +1410,7 @@ input:focus {
 
 .message-form textarea {
   overflow-y: auto;
+  min-width: 0;
   min-height: 35px;
   max-height: 120px;
   flex: 1;
@@ -1697,7 +1858,8 @@ html[data-theme="light"] .sidebar-profile {
 
 html[data-theme="light"] .message-form,
 html[data-theme="light"] .modal,
-html[data-theme="light"] .auth-card {
+html[data-theme="light"] .auth-card,
+html[data-theme="light"] .video-stage {
   background: var(--panel);
 }
 
@@ -1796,6 +1958,10 @@ html[data-theme="light"] .toast {
     width: 38px;
     padding: 0;
   }
+
+  .video-grid {
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -1881,11 +2047,48 @@ html[data-theme="light"] .toast {
 
   .composer-voice-controls {
     gap: 4px;
+    overflow-x: auto;
+    max-width: 148px;
+    scrollbar-width: none;
+  }
+
+  .composer-voice-controls::-webkit-scrollbar {
+    display: none;
   }
 
   .composer-voice-button {
     width: 35px;
     height: 35px;
+  }
+
+  .video-stage {
+    margin: 9px 12px 0;
+    padding: 9px;
+    border-radius: 13px;
+  }
+
+  .video-grid {
+    max-height: 34vh;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .video-tile {
+    min-height: 96px;
+    border-radius: 9px;
+  }
+
+  .video-tile-footer {
+    padding: 18px 7px 6px;
+  }
+
+  .video-tile-footer span {
+    display: none;
+  }
+
+  .video-avatar {
+    width: 42px;
+    height: 42px;
   }
 
   .composer-divider {

@@ -501,6 +501,8 @@ function voicePeerPayload(socket) {
     peerId: socket.peerId,
     user: publicUser(socket.user),
     muted: Boolean(socket.muted),
+    cameraEnabled: Boolean(socket.cameraEnabled),
+    screenSharing: Boolean(socket.screenSharing),
   };
 }
 
@@ -560,6 +562,8 @@ function joinVoiceRoom(socket, roomId) {
 
   socket.voiceRoomId = roomId;
   socket.muted = false;
+  socket.cameraEnabled = false;
+  socket.screenSharing = false;
   peers.set(socket.peerId, socket);
 
   sendSocket(socket, {
@@ -628,6 +632,19 @@ function handleVoiceSocketMessage(socket, rawMessage) {
       roomId: socket.voiceRoomId,
       peerId: socket.peerId,
       muted: socket.muted,
+    });
+    sendVoicePresence(socket.voiceRoomId);
+    return;
+  }
+  if (message.type === "voice-media-state" && socket.voiceRoomId) {
+    socket.cameraEnabled = Boolean(message.cameraEnabled);
+    socket.screenSharing = Boolean(message.screenSharing);
+    broadcastVoiceRoom(socket.voiceRoomId, {
+      type: "voice-peer-media",
+      roomId: socket.voiceRoomId,
+      peerId: socket.peerId,
+      cameraEnabled: socket.cameraEnabled,
+      screenSharing: socket.screenSharing,
     });
     sendVoicePresence(socket.voiceRoomId);
     return;
@@ -1106,6 +1123,8 @@ server.on("upgrade", (req, socket, head) => {
     webSocket.peerId = newId("peer");
     webSocket.voiceRoomId = null;
     webSocket.muted = false;
+    webSocket.cameraEnabled = false;
+    webSocket.screenSharing = false;
     voiceSocketServer.emit("connection", webSocket, req);
   });
 });
