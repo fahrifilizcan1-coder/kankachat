@@ -5,6 +5,7 @@ const os = require("os");
 const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const { WebSocketServer, WebSocket } = require("ws");
+const Busboy = require("busboy");
 
 loadEnv();
 
@@ -16,8 +17,30 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
 const STATE_FILE = path.join(DATA_DIR, "state.json");
+const UPLOAD_DIR = path.join(ROOT, "uploads");
 const SESSION_COOKIE = "kanka_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const ALLOWED_UPLOADS = new Map([
+  [".png", { mimeTypes: ["image/png"], isImage: true }],
+  [".jpg", { mimeTypes: ["image/jpeg", "image/jpg"], isImage: true }],
+  [".jpeg", { mimeTypes: ["image/jpeg", "image/jpg"], isImage: true }],
+  [".gif", { mimeTypes: ["image/gif"], isImage: true }],
+  [".pdf", { mimeTypes: ["application/pdf"], isImage: false }],
+  [".docx", {
+    mimeTypes: [
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/zip",
+      "application/octet-stream",
+    ],
+    isImage: false,
+  }],
+  [".txt", { mimeTypes: ["text/plain"], isImage: false }],
+  [".zip", {
+    mimeTypes: ["application/zip", "application/x-zip-compressed", "application/octet-stream"],
+    isImage: false,
+  }],
+]);
 const oauthClient = new OAuth2Client(GOOGLE_CLIENT_ID || undefined);
 
 const sessions = new Map();
@@ -43,6 +66,7 @@ function loadEnv() {
 
 function loadState() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   if (!fs.existsSync(STATE_FILE)) {
     return { users: [], rooms: [], messages: [] };
   }
@@ -50,7 +74,7 @@ function loadState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     return {
-      users: Array.isArray(parsed.users) ? parsed.users : [],
+      users: Array.isArray(parsed.users) ? parsed.users.map(normalizeUser) : [],
       rooms: Array.isArray(parsed.rooms) ? parsed.rooms : [],
       messages: Array.isArray(parsed.messages) ? parsed.messages : [],
     };
@@ -58,6 +82,16 @@ function loadState() {
     console.error("Veri dosyasi okunamadi, bos durumla baslatiliyor:", error.message);
     return { users: [], rooms: [], messages: [] };
   }
+}
+
+function normalizeUser(user) {
+  return {
+    ...user,
+    displayName: String(user.displayName || user.name || "Yeni Kanka").slice(0, 40),
+    bio: String(user.bio || "").slice(0, 160),
+    statusMessage: String(user.statusMessage || "").slice(0, 60),
+    theme: user.theme === "light" ? "light" : "dark",
+  };
 }
 
 function scheduleSave() {
@@ -186,9 +220,11 @@ function createKankaId() {
 function publicUser(user) {
   return {
     id: user.id,
-    name: user.name,
+    name: user.displayName || user.name,
     picture: user.picture || "",
     kankaId: user.kankaId,
+    bio: user.bio || "",
+    statusMessage: user.statusMessage || "",
   };
 }
 
@@ -197,6 +233,32 @@ function ownUser(user) {
     ...publicUser(user),
     email: user.email,
     googleSub: user.googleSub,
+    googleName: user.name,
+    theme: user.theme === "light" ? "light" : "dark",
+  };
+}
+
+function publicAttachment(attachment) {
+  if (!attachment) return undefined;
+  return {
+    id: attachment.id,
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    isImage: attachment.isImage,
+  };
+}
+
+function messagePayload(message, user) {
+  return {
+    id: message.id,
+    roomId: message.roomId,
+    userId: message.userId,
+    type: message.type || (message.attachment ? "file" : "text"),
+    content: message.content || "",
+    attachment: publicAttachment(message.attachment),
+    createdAt: message.createdAt,
+    user: publicUser(user),
   };
 }
 
@@ -208,8 +270,12 @@ function upsertUser(profile) {
       googleSub: profile.googleSub,
       email: profile.email || "",
       name: profile.name || "Yeni Kanka",
+      displayName: profile.name || "Yeni Kanka",
       picture: profile.picture || "",
       kankaId: createKankaId(),
+      bio: "",
+      statusMessage: "",
+      theme: "dark",
       createdAt: new Date().toISOString(),
     };
     state.users.push(user);
@@ -226,9 +292,151 @@ function upsertUser(profile) {
     user.email = profile.email || user.email;
     user.name = profile.name || user.name;
     user.picture = profile.picture || user.picture;
+    user.displayName ||= user.name;
+    user.bio ||= "";
+    user.statusMessage ||= "";
+    user.theme = user.theme === "light" ? "light" : "dark";
   }
   scheduleSave();
   return user;
+}
+
+function safeOriginalName(filename) {
+  const extension = path.extname(filename).toLowerCase();
+  const base = path.basename(filename, path.extname(filename))
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 80) || "dosya";
+  return `${base}${extension}`;
+}
+
+function validateFileSignature(buffer, extension) {
+  if (extension === ".png") {
+    return buffer.length >= 8
+      && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+  if (extension === ".jpg" || extension === ".jpeg") {
+    return buffer.length >= 3
+      && buffer[0] === 0xff
+      && buffer[1] === 0xd8
+      && buffer[2] === 0xff;
+  }
+  if (extension === ".gif") {
+    const header = buffer.subarray(0, 6).toString("ascii");
+    return header === "GIF87a" || header === "GIF89a";
+  }
+  if (extension === ".pdf") return buffer.subarray(0, 5).toString("ascii") === "%PDF-";
+  if (extension === ".zip" || extension === ".docx") {
+    const isZip = buffer.length >= 4
+      && buffer[0] === 0x50
+      && buffer[1] === 0x4b
+      && [0x03, 0x05, 0x07].includes(buffer[2])
+      && [0x04, 0x06, 0x08].includes(buffer[3]);
+    if (!isZip) return false;
+    if (extension === ".docx") {
+      return buffer.includes(Buffer.from("[Content_Types].xml"))
+        && buffer.includes(Buffer.from("word/"));
+    }
+    return true;
+  }
+  if (extension === ".txt") {
+    return !buffer.subarray(0, Math.min(buffer.length, 4096)).includes(0);
+  }
+  return false;
+}
+
+const localUploadStorage = {
+  async save(buffer, extension) {
+    const storageKey = `${crypto.randomUUID()}${extension}`;
+    await fs.promises.writeFile(path.join(UPLOAD_DIR, storageKey), buffer, { flag: "wx" });
+    return storageKey;
+  },
+  async read(storageKey) {
+    return fs.promises.readFile(path.join(UPLOAD_DIR, path.basename(storageKey)));
+  },
+};
+
+function parseUpload(req) {
+  return new Promise((resolve, reject) => {
+    let upload;
+    let caption = "";
+    let rejected = false;
+
+    let busboy;
+    try {
+      busboy = Busboy({
+        headers: req.headers,
+        limits: { files: 1, fileSize: MAX_UPLOAD_BYTES, fields: 2 },
+      });
+    } catch {
+      reject(new Error("Gecersiz dosya yukleme istegi."));
+      return;
+    }
+
+    busboy.on("field", (name, value) => {
+      if (name === "caption") caption = String(value).trim().slice(0, 500);
+    });
+    busboy.on("file", (name, stream, info) => {
+      if (name !== "file" || upload) {
+        stream.resume();
+        return;
+      }
+
+      const originalName = safeOriginalName(info.filename || "dosya");
+      const extension = path.extname(originalName).toLowerCase();
+      const allowed = ALLOWED_UPLOADS.get(extension);
+      const chunks = [];
+      let size = 0;
+
+      if (!allowed || !allowed.mimeTypes.includes(info.mimeType)) rejected = true;
+      stream.on("data", (chunk) => {
+        size += chunk.length;
+        if (!rejected) chunks.push(chunk);
+      });
+      stream.on("limit", () => {
+        rejected = true;
+      });
+      stream.on("end", () => {
+        if (rejected) return;
+        const buffer = Buffer.concat(chunks);
+        if (!validateFileSignature(buffer, extension)) {
+          rejected = true;
+          return;
+        }
+        upload = {
+          buffer,
+          originalName,
+          extension,
+          mimeType: allowed.mimeTypes[0],
+          size,
+          isImage: allowed.isImage,
+        };
+      });
+    });
+    busboy.on("filesLimit", () => {
+      rejected = true;
+    });
+    busboy.on("error", reject);
+    busboy.on("finish", () => {
+      if (rejected) {
+        reject(new Error("Dosya turu gecersiz veya dosya 10 MB sinirini asiyor."));
+      } else if (!upload) {
+        reject(new Error("Yuklenecek dosya bulunamadi."));
+      } else {
+        resolve({ upload, caption });
+      }
+    });
+    req.pipe(busboy);
+  });
+}
+
+function usersSharingRoomsWith(userId) {
+  return new Set(
+    state.rooms
+      .filter((room) => room.memberIds.includes(userId))
+      .flatMap((room) => room.memberIds),
+  );
 }
 
 function roomForUser(roomId, userId) {
@@ -556,6 +764,77 @@ async function apiHandler(req, res, url) {
     return;
   }
 
+  if (req.method === "PATCH" && url.pathname === "/api/profile") {
+    const body = await readJson(req);
+    const displayName = String(body.displayName || "").trim().slice(0, 40);
+    const bio = String(body.bio || "").trim().slice(0, 160);
+    const statusMessage = String(body.statusMessage || "").trim().slice(0, 60);
+    const theme = ["dark", "light"].includes(body.theme)
+      ? body.theme
+      : auth.user.theme;
+
+    if (displayName.length < 2) {
+      sendError(res, 400, "Gorunen ad en az 2 karakter olmali.");
+      return;
+    }
+
+    auth.user.displayName = displayName;
+    auth.user.bio = bio;
+    auth.user.statusMessage = statusMessage;
+    auth.user.theme = theme;
+    scheduleSave();
+
+    const sharedUserIds = usersSharingRoomsWith(auth.user.id);
+    broadcastToUsers(sharedUserIds, "profile-updated", {
+      user: publicUser(auth.user),
+    });
+    sendJson(res, 200, { user: ownUser(auth.user) });
+    return;
+  }
+
+  if (req.method === "PATCH" && url.pathname === "/api/settings/theme") {
+    const body = await readJson(req);
+    if (!["dark", "light"].includes(body.theme)) {
+      sendError(res, 400, "Gecersiz tema.");
+      return;
+    }
+    auth.user.theme = body.theme;
+    scheduleSave();
+    sendJson(res, 200, { theme: auth.user.theme });
+    return;
+  }
+
+  const fileMatch = url.pathname.match(/^\/api\/files\/([^/]+)$/);
+  if (fileMatch && req.method === "GET") {
+    const message = state.messages.find(
+      (entry) => entry.attachment?.id === fileMatch[1],
+    );
+    if (!message || !roomForUser(message.roomId, auth.user.id)) {
+      sendError(res, 404, "Dosya bulunamadi.");
+      return;
+    }
+
+    try {
+      const attachment = message.attachment;
+      const content = await localUploadStorage.read(attachment.storageKey);
+      const disposition = attachment.isImage
+        ? "inline"
+        : "attachment";
+      res.writeHead(200, {
+        "Content-Type": attachment.mimeType,
+        "Content-Length": content.length,
+        "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(attachment.originalName)}`,
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'",
+      });
+      res.end(content);
+    } catch {
+      sendError(res, 404, "Dosya depolamada bulunamadi.");
+    }
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/events") {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -590,6 +869,45 @@ async function apiHandler(req, res, url) {
     return;
   }
 
+  const uploadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/uploads$/);
+  if (uploadMatch && req.method === "POST") {
+    const room = roomForUser(uploadMatch[1], auth.user.id);
+    if (!room) {
+      sendError(res, 404, "Oda bulunamadi.");
+      return;
+    }
+
+    try {
+      const { upload, caption } = await parseUpload(req);
+      const storageKey = await localUploadStorage.save(upload.buffer, upload.extension);
+      const message = {
+        id: newId("msg"),
+        roomId: room.id,
+        userId: auth.user.id,
+        type: "file",
+        content: caption,
+        attachment: {
+          id: newId("file"),
+          originalName: upload.originalName,
+          mimeType: upload.mimeType,
+          size: upload.size,
+          isImage: upload.isImage,
+          storageKey,
+        },
+        createdAt: new Date().toISOString(),
+      };
+      state.messages.push(message);
+      if (state.messages.length > 10_000) state.messages = state.messages.slice(-10_000);
+      scheduleSave();
+      const payload = messagePayload(message, auth.user);
+      notifyRoomMembers(room, "chat-message", payload);
+      sendJson(res, 201, { message: payload });
+    } catch (error) {
+      sendError(res, 400, error.message || "Dosya yuklenemedi.");
+    }
+    return;
+  }
+
   const messagesMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/messages$/);
   if (messagesMatch && req.method === "GET") {
     const room = roomForUser(messagesMatch[1], auth.user.id);
@@ -600,15 +918,16 @@ async function apiHandler(req, res, url) {
     const messages = state.messages
       .filter((message) => message.roomId === room.id)
       .slice(-200)
-      .map((message) => ({
-        ...message,
-        user: publicUser(state.users.find((user) => user.id === message.userId) || {
+      .map((message) => messagePayload(
+        message,
+        state.users.find((user) => user.id === message.userId) || {
           id: "unknown",
           name: "Bilinmeyen Kullanici",
+          displayName: "Bilinmeyen Kullanici",
           kankaId: "",
           picture: "",
-        }),
-      }));
+        },
+      ));
     sendJson(res, 200, { messages });
     return;
   }
@@ -629,13 +948,14 @@ async function apiHandler(req, res, url) {
       id: newId("msg"),
       roomId: room.id,
       userId: auth.user.id,
+      type: "text",
       content,
       createdAt: new Date().toISOString(),
     };
     state.messages.push(message);
     if (state.messages.length > 10_000) state.messages = state.messages.slice(-10_000);
     scheduleSave();
-    const payload = { ...message, user: publicUser(auth.user) };
+    const payload = messagePayload(message, auth.user);
     notifyRoomMembers(room, "chat-message", payload);
     sendJson(res, 201, { message: payload });
     return;

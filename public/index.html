@@ -9,8 +9,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css?v=20260605-2">
-    <script src="/app.js?v=20260605-2" defer></script>
+    <link rel="stylesheet" href="/style.css?v=20260605-3">
+    <script src="/app.js?v=20260605-3" defer></script>
   </head>
   <body>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
@@ -151,11 +151,16 @@
         </div>
 
         <div class="sidebar-profile">
-          <div id="my-avatar" class="avatar avatar-medium"></div>
-          <div class="profile-copy">
-            <strong id="my-name">Kullanıcı</strong>
-            <span><i class="status-dot"></i> Çevrimiçi</span>
-          </div>
+          <button id="open-profile-button" class="profile-button" type="button" aria-label="Profilini aç">
+            <div id="my-avatar" class="avatar avatar-medium"></div>
+            <div class="profile-copy">
+              <strong id="my-name">Kullanıcı</strong>
+              <span id="my-status"><i class="status-dot"></i> Çevrimiçi</span>
+            </div>
+          </button>
+          <button id="settings-button" class="icon-button" aria-label="Ayarlar" title="Ayarlar">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg>
+          </button>
           <button id="logout-button" class="icon-button" aria-label="Çıkış yap" title="Çıkış yap">
             <svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3"></path><path d="M14 4h5a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5"></path></svg>
           </button>
@@ -206,6 +211,10 @@
                 <span id="voice-status" class="voice-status"></span>
               </div>
               <span class="composer-divider" aria-hidden="true"></span>
+              <button id="file-button" class="composer-file-button" type="button" aria-label="Dosya gönder" title="Dosya gönder">
+                <svg viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9"></path></svg>
+              </button>
+              <input id="file-input" class="hidden" type="file" accept=".png,.jpg,.jpeg,.gif,.pdf,.docx,.txt,.zip">
               <textarea id="message-input" rows="1" maxlength="2000" placeholder="Mesaj yaz..." aria-label="Mesaj"></textarea>
               <span id="message-count" class="message-count"></span>
               <button type="submit" class="send-button" aria-label="Mesajı gönder">
@@ -256,6 +265,65 @@
           <input id="invite-id" name="kankaId" maxlength="12" placeholder="KANKA-ABC123" autocomplete="off" required>
           <button class="primary-button wide" type="submit">Odaya davet et</button>
         </form>
+      </section>
+
+      <section id="profile-modal" class="modal profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+        <button class="modal-close" data-close-modal aria-label="Kapat">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+        <div class="profile-hero">
+          <div id="profile-avatar" class="avatar profile-avatar"></div>
+          <div>
+            <span class="profile-kicker">PROFİLİN</span>
+            <h2 id="profile-title">Profilini düzenle</h2>
+            <p id="profile-google-info"></p>
+          </div>
+        </div>
+        <form id="profile-form">
+          <label for="profile-display-name">Görünen ad</label>
+          <input id="profile-display-name" name="displayName" minlength="2" maxlength="40" required>
+          <label for="profile-status">Durum mesajı</label>
+          <input id="profile-status" name="statusMessage" maxlength="60" placeholder="Örn. Şu an oyundayım">
+          <label for="profile-bio">Bio</label>
+          <textarea id="profile-bio" name="bio" maxlength="160" rows="4" placeholder="Kendinden biraz bahset"></textarea>
+          <div class="field-note"><span id="profile-kanka-id"></span><span id="profile-email"></span></div>
+          <button class="primary-button wide" type="submit">Profili kaydet</button>
+        </form>
+      </section>
+
+      <section id="user-profile-modal" class="modal public-profile-modal hidden" role="dialog" aria-modal="true" aria-labelledby="view-profile-name">
+        <button class="modal-close" data-close-modal aria-label="Kapat">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+        <div id="view-profile-avatar" class="avatar public-profile-avatar"></div>
+        <span id="view-profile-status" class="public-profile-status"></span>
+        <h2 id="view-profile-name">Kullanıcı</h2>
+        <p id="view-profile-bio" class="public-profile-bio"></p>
+        <div class="public-profile-id">
+          <span>Kanka ID</span>
+          <strong id="view-profile-kanka-id"></strong>
+        </div>
+      </section>
+
+      <section id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <button class="modal-close" data-close-modal aria-label="Kapat">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+        <span class="modal-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"></path><circle cx="12" cy="12" r="4"></circle></svg>
+        </span>
+        <h2 id="settings-title">Görünüm ayarları</h2>
+        <p>Tema tercihin hesabına kaydedilir ve diğer cihazlarında da uygulanır.</p>
+        <div class="theme-options">
+          <button class="theme-option" type="button" data-theme-choice="dark">
+            <span class="theme-preview dark-preview"></span>
+            <span><strong>Koyu</strong><small>Gece kullanımı için rahat</small></span>
+          </button>
+          <button class="theme-option" type="button" data-theme-choice="light">
+            <span class="theme-preview light-preview"></span>
+            <span><strong>Açık</strong><small>Aydınlık ve ferah görünüm</small></span>
+          </button>
+        </div>
       </section>
     </div>
   </body>

@@ -24,6 +24,21 @@ const state = {
 };
 
 let googleScriptPromise = null;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const ALLOWED_FILE_TYPES = new Map([
+  [".png", ["image/png"]],
+  [".jpg", ["image/jpeg", "image/jpg"]],
+  [".jpeg", ["image/jpeg", "image/jpg"]],
+  [".gif", ["image/gif"]],
+  [".pdf", ["application/pdf"]],
+  [".docx", [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/zip",
+    "application/octet-stream",
+  ]],
+  [".txt", ["text/plain"]],
+  [".zip", ["application/zip", "application/x-zip-compressed", "application/octet-stream"]],
+]);
 
 const elements = {
   authView: document.querySelector("#auth-view"),
@@ -39,6 +54,7 @@ const elements = {
   devLoginForm: document.querySelector("#dev-login-form"),
   myKankaId: document.querySelector("#my-kanka-id"),
   myName: document.querySelector("#my-name"),
+  myStatus: document.querySelector("#my-status"),
   myAvatar: document.querySelector("#my-avatar"),
   roomList: document.querySelector("#room-list"),
   activeRoomName: document.querySelector("#active-room-name"),
@@ -63,6 +79,24 @@ const elements = {
   leaveVoiceButton: document.querySelector("#leave-voice-button"),
   voiceStatus: document.querySelector("#voice-status"),
   voiceAudioRoot: document.querySelector("#voice-audio-root"),
+  fileButton: document.querySelector("#file-button"),
+  fileInput: document.querySelector("#file-input"),
+  profileModal: document.querySelector("#profile-modal"),
+  profileForm: document.querySelector("#profile-form"),
+  profileAvatar: document.querySelector("#profile-avatar"),
+  profileDisplayName: document.querySelector("#profile-display-name"),
+  profileStatus: document.querySelector("#profile-status"),
+  profileBio: document.querySelector("#profile-bio"),
+  profileGoogleInfo: document.querySelector("#profile-google-info"),
+  profileEmail: document.querySelector("#profile-email"),
+  profileKankaId: document.querySelector("#profile-kanka-id"),
+  userProfileModal: document.querySelector("#user-profile-modal"),
+  viewProfileAvatar: document.querySelector("#view-profile-avatar"),
+  viewProfileName: document.querySelector("#view-profile-name"),
+  viewProfileStatus: document.querySelector("#view-profile-status"),
+  viewProfileBio: document.querySelector("#view-profile-bio"),
+  viewProfileKankaId: document.querySelector("#view-profile-kanka-id"),
+  settingsModal: document.querySelector("#settings-modal"),
 };
 
 document.addEventListener("DOMContentLoaded", initialize);
@@ -104,13 +138,14 @@ async function initialize() {
 }
 
 async function api(path, options = {}) {
+  const isFormData = options.body instanceof FormData;
   const response = await fetch(path, {
+    ...options,
     credentials: "same-origin",
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(options.headers || {}),
     },
-    ...options,
   });
 
   let body = {};
@@ -185,6 +220,14 @@ function bindEvents() {
     retryGoogleLogin,
     "#google-retry-button",
   );
+  on(document.querySelector("#open-profile-button"), "click", openOwnProfile, "#open-profile-button");
+  on(document.querySelector("#settings-button"), "click", openSettings, "#settings-button");
+  on(elements.profileForm, "submit", saveProfile, "#profile-form");
+  on(elements.fileButton, "click", () => elements.fileInput?.click(), "#file-button");
+  on(elements.fileInput, "change", handleFileSelection, "#file-input");
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    on(button, "click", () => saveTheme(button.dataset.themeChoice), "[data-theme-choice]");
+  });
 }
 
 function showAuth() {
@@ -373,6 +416,7 @@ async function enterApp() {
   state.me = bootstrap.me;
   state.rooms = bootstrap.rooms;
   state.onlineUserIds = new Set(bootstrap.onlineUserIds);
+  applyTheme(state.me.theme);
 
   if (!state.activeRoomId || !getActiveRoom()) {
     state.activeRoomId = state.rooms[0]?.id || null;
@@ -395,7 +439,115 @@ async function enterApp() {
 function renderProfile() {
   elements.myKankaId.textContent = state.me.kankaId;
   elements.myName.textContent = state.me.name;
+  elements.myStatus.innerHTML = "";
+  const dot = document.createElement("i");
+  dot.className = "status-dot";
+  elements.myStatus.append(dot, document.createTextNode(
+    state.me.statusMessage || "Çevrimiçi",
+  ));
   renderAvatar(elements.myAvatar, state.me);
+}
+
+function applyTheme(theme) {
+  const selectedTheme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = selectedTheme;
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.themeChoice === selectedTheme);
+  });
+}
+
+function openOwnProfile() {
+  if (!state.me) return;
+  renderAvatar(elements.profileAvatar, state.me);
+  elements.profileDisplayName.value = state.me.name;
+  elements.profileStatus.value = state.me.statusMessage || "";
+  elements.profileBio.value = state.me.bio || "";
+  elements.profileGoogleInfo.textContent = `Google hesabı: ${state.me.googleName || state.me.name}`;
+  elements.profileEmail.textContent = state.me.email || "";
+  elements.profileKankaId.textContent = state.me.kankaId;
+  openModal(elements.profileModal);
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    const result = await api("/api/profile", {
+      method: "PATCH",
+      body: JSON.stringify({
+        displayName: elements.profileDisplayName.value,
+        statusMessage: elements.profileStatus.value,
+        bio: elements.profileBio.value,
+        theme: state.me.theme,
+      }),
+    });
+    state.me = result.user;
+    replaceUserEverywhere(result.user);
+    renderProfile();
+    renderMembers();
+    renderMessages();
+    closeModals();
+    showToast("Profilin güncellendi.");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openUserProfile(user) {
+  if (!user) return;
+  if (user.id === state.me.id) {
+    openOwnProfile();
+    return;
+  }
+  renderAvatar(elements.viewProfileAvatar, user);
+  elements.viewProfileName.textContent = user.name;
+  elements.viewProfileStatus.textContent = user.statusMessage || "Çevrimiçi";
+  elements.viewProfileBio.textContent = user.bio || "Henüz bio eklenmemiş.";
+  elements.viewProfileKankaId.textContent = user.kankaId;
+  openModal(elements.userProfileModal);
+}
+
+function openSettings() {
+  applyTheme(state.me?.theme);
+  openModal(elements.settingsModal);
+}
+
+async function saveTheme(theme) {
+  if (!["dark", "light"].includes(theme) || !state.me) return;
+  const previousTheme = state.me.theme;
+  state.me.theme = theme;
+  applyTheme(theme);
+  try {
+    await api("/api/settings/theme", {
+      method: "PATCH",
+      body: JSON.stringify({ theme }),
+    });
+    closeModals();
+    showToast(theme === "light" ? "Açık tema etkin." : "Koyu tema etkin.");
+  } catch (error) {
+    state.me.theme = previousTheme;
+    applyTheme(previousTheme);
+    showToast(error.message, "error");
+  }
+}
+
+function replaceUserEverywhere(user) {
+  for (const room of state.rooms) {
+    room.members = room.members.map((member) => (
+      member.id === user.id ? { ...member, ...user } : member
+    ));
+  }
+  state.messages = state.messages.map((message) => (
+    message.userId === user.id
+      ? { ...message, user: { ...message.user, ...user } }
+      : message
+  ));
+  for (const participant of state.voice.participants.values()) {
+    if (participant.user?.id === user.id) participant.user = { ...participant.user, ...user };
+  }
 }
 
 function renderRooms() {
@@ -513,8 +665,15 @@ function createMessageElement(message, compact = false) {
   article.dataset.messageId = message.id;
 
   const avatar = document.createElement("div");
-  avatar.className = "avatar avatar-message";
+  avatar.className = "avatar avatar-message message-user-action";
+  avatar.tabIndex = 0;
+  avatar.setAttribute("role", "button");
+  avatar.setAttribute("aria-label", `${message.user.name} profilini aç`);
   renderAvatar(avatar, message.user);
+  avatar.addEventListener("click", () => openUserProfile(message.user));
+  avatar.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") openUserProfile(message.user);
+  });
 
   const body = document.createElement("div");
   const meta = document.createElement("div");
@@ -522,6 +681,8 @@ function createMessageElement(message, compact = false) {
   const author = document.createElement("span");
   author.className = "message-author";
   author.textContent = message.userId === state.me.id ? `${message.user.name} (sen)` : message.user.name;
+  author.classList.add("message-user-action");
+  author.addEventListener("click", () => openUserProfile(message.user));
   const time = document.createElement("time");
   time.className = "message-time";
   time.dateTime = message.createdAt;
@@ -531,9 +692,51 @@ function createMessageElement(message, compact = false) {
   const content = document.createElement("p");
   content.className = "message-text";
   content.textContent = message.content;
-  body.append(meta, content);
+  body.append(meta);
+  if (message.content) body.append(content);
+  if (message.attachment) body.append(createAttachmentElement(message.attachment));
   article.append(avatar, body);
   return article;
+}
+
+function createAttachmentElement(attachment) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "message-attachment";
+  const url = `/api/files/${encodeURIComponent(attachment.id)}`;
+
+  if (attachment.isImage) {
+    const link = document.createElement("a");
+    link.className = "attachment-image-link";
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    const image = document.createElement("img");
+    image.className = "attachment-image";
+    image.src = url;
+    image.alt = attachment.originalName;
+    image.loading = "lazy";
+    link.append(image);
+    wrapper.append(link);
+    return wrapper;
+  }
+
+  const link = document.createElement("a");
+  link.className = "attachment-file-card";
+  link.href = url;
+  link.download = attachment.originalName;
+  const icon = document.createElement("span");
+  icon.className = "attachment-file-icon";
+  icon.innerHTML = '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"></path><path d="M14 2v6h6M8 15h8M8 18h5"></path></svg>';
+  const copy = document.createElement("span");
+  copy.className = "attachment-file-copy";
+  const name = document.createElement("strong");
+  name.textContent = attachment.originalName;
+  const details = document.createElement("span");
+  details.textContent = `${fileExtensionLabel(attachment.originalName)} · ${formatBytes(attachment.size)}`;
+  copy.append(name, details);
+  link.append(icon, copy);
+  wrapper.append(link);
+  return wrapper;
 }
 
 function appendMessage(message) {
@@ -581,6 +784,53 @@ async function sendMessage(event) {
   }
 }
 
+async function handleFileSelection(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  if (!state.activeRoomId) {
+    showToast("Önce bir sohbet odası seç.", "error");
+    return;
+  }
+
+  const extension = getFileExtension(file.name);
+  const allowedMimeTypes = ALLOWED_FILE_TYPES.get(extension);
+  const normalizedType = file.type || "application/octet-stream";
+  if (!allowedMimeTypes || !allowedMimeTypes.includes(normalizedType)) {
+    showToast("Bu dosya türü desteklenmiyor.", "error");
+    return;
+  }
+  if (file.size <= 0 || file.size > MAX_UPLOAD_BYTES) {
+    showToast("Dosya boyutu 10 MB veya daha küçük olmalı.", "error");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  const caption = elements.messageInput.value.trim();
+  if (caption) formData.append("caption", caption);
+
+  elements.fileButton.disabled = true;
+  elements.fileButton.title = "Dosya yükleniyor...";
+  try {
+    const response = await api(
+      `/api/rooms/${encodeURIComponent(state.activeRoomId)}/uploads`,
+      { method: "POST", body: formData },
+    );
+    if (caption) {
+      elements.messageInput.value = "";
+      resizeComposer();
+    }
+    appendMessage(response.message);
+    showToast(`${response.message.attachment.originalName} gönderildi.`);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    elements.fileButton.disabled = false;
+    elements.fileButton.title = "Dosya gönder";
+  }
+}
+
 function handleMessageInput() {
   resizeComposer();
   const length = elements.messageInput.value.length;
@@ -594,6 +844,21 @@ function handleMessageInput() {
       body: "{}",
     }).catch(() => {});
   }
+}
+
+function getFileExtension(filename) {
+  const index = filename.lastIndexOf(".");
+  return index === -1 ? "" : filename.slice(index).toLowerCase();
+}
+
+function fileExtensionLabel(filename) {
+  return getFileExtension(filename).replace(".", "").toUpperCase() || "DOSYA";
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function resizeComposer() {
@@ -616,6 +881,12 @@ function renderMembers() {
     const online = state.onlineUserIds.has(member.id);
     const item = document.createElement("div");
     item.className = `member-item${online ? "" : " offline"}`;
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.addEventListener("click", () => openUserProfile(member));
+    item.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") openUserProfile(member);
+    });
     const avatar = document.createElement("div");
     avatar.className = "avatar avatar-member";
     renderAvatar(avatar, member, online);
@@ -628,7 +899,7 @@ function renderMembers() {
     const voiceParticipant = voiceParticipantForUser(member.id);
     status.textContent = voiceParticipant
       ? `Seste${voiceParticipant.muted ? " · Mikrofon kapalı" : ""}`
-      : online ? "Çevrimiçi" : "Çevrimdışı";
+      : member.statusMessage || (online ? "Çevrimiçi" : "Çevrimdışı");
     copy.append(name, status);
     item.append(avatar, copy);
     elements.memberList.append(item);
@@ -1029,6 +1300,17 @@ function connectEvents() {
     await refreshRooms();
   });
 
+  source.addEventListener("profile-updated", (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.user.id === state.me.id) {
+      state.me = { ...state.me, ...payload.user };
+      renderProfile();
+    }
+    replaceUserEverywhere(payload.user);
+    renderMembers();
+    renderMessages();
+  });
+
   source.addEventListener("typing", (event) => {
     const payload = JSON.parse(event.data);
     if (payload.roomId !== state.activeRoomId || payload.user.id === state.me.id) return;
@@ -1152,14 +1434,21 @@ function showAuthAfterLogout() {
 }
 
 function openModal(modal) {
+  if (!modal) return;
+  closeModals();
   elements.modalBackdrop.classList.remove("hidden");
   modal.classList.remove("hidden");
 }
 
 function closeModals() {
   elements.modalBackdrop.classList.add("hidden");
-  elements.createRoomModal.classList.add("hidden");
-  elements.inviteModal.classList.add("hidden");
+  [
+    elements.createRoomModal,
+    elements.inviteModal,
+    elements.profileModal,
+    elements.userProfileModal,
+    elements.settingsModal,
+  ].forEach((modal) => modal?.classList.add("hidden"));
 }
 
 function getActiveRoom() {
