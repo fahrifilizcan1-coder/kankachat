@@ -1,0 +1,19 @@
+{
+  "name": "kanka-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Google girisli, Kanka ID ile ozel oda davetli sohbet uygulamasi",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "google-auth-library": "^10.7.0",
+    "ws": "^8.21.0"
+  }
+}

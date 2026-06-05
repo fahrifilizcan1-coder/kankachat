@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#11131a">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+    <title>Kanka Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css?v=20260605-2">
+    <script src="/app.js?v=20260605-2" defer></script>
+  </head>
+  <body>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+    <main id="auth-view" class="auth-view">
+      <section class="auth-copy">
+        <a class="brand brand-large" href="/" aria-label="Kanka Chat ana sayfa">
+          <span class="brand-mark">K</span>
+          <span>Kanka Chat</span>
+        </a>
+
+        <div class="hero">
+          <p class="eyebrow"><span></span> Sadece davet ettiklerin burada</p>
+          <h1>Ekibini topla.<br><em>Sohbeti başlat.</em></h1>
+          <p class="hero-text">
+            Google hesabınla gir, sana özel Kanka ID'ni paylaş ve arkadaşlarınla
+            güvenli sohbet odaları kur.
+          </p>
+
+          <div class="feature-row">
+            <article>
+              <span class="feature-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3 4.5 6v5.4c0 4.6 3.2 8.8 7.5 9.6 4.3-.8 7.5-5 7.5-9.6V6L12 3Z"></path>
+                  <path d="m9.2 12 1.8 1.8 4-4"></path>
+                </svg>
+              </span>
+              <div><strong>Özel odalar</strong><small>Kimlerin katılacağını sen seç.</small></div>
+            </article>
+            <article>
+              <span class="feature-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 12h8M12 8v8"></path>
+                  <circle cx="12" cy="12" r="9"></circle>
+                </svg>
+              </span>
+              <div><strong>Kolay davet</strong><small>Tek gereken bir Kanka ID.</small></div>
+            </article>
+          </div>
+        </div>
+
+        <p class="auth-footer">Arkadaşlarınla arandaki en kısa yol.</p>
+      </section>
+
+      <section class="auth-panel-wrap">
+        <div class="ambient ambient-one"></div>
+        <div class="ambient ambient-two"></div>
+        <div class="auth-card">
+          <div class="mobile-brand">
+            <span class="brand-mark">K</span>
+            <span>Kanka Chat</span>
+          </div>
+          <span class="auth-badge">HOŞ GELDİN</span>
+          <h2>Sohbete katıl</h2>
+          <p>Hesabını oluşturmak veya devam etmek için Google ile giriş yap.</p>
+
+          <div id="google-button" class="google-button"></div>
+          <button id="google-fallback-button" class="google-fallback-button hidden" type="button">
+            <span class="google-logo" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.8 3-4.3 3-7.3Z"></path>
+                <path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4L15.4 17c-.9.6-2 1-3.4 1a5.8 5.8 0 0 1-5.5-4H3.2v2.6A10 10 0 0 0 12 22Z"></path>
+                <path fill="#FBBC05" d="M6.5 14a6 6 0 0 1 0-3.9V7.5H3.2a10 10 0 0 0 0 9l3.3-2.5Z"></path>
+                <path fill="#EA4335" d="M12 6c1.6 0 3 .5 4.2 1.6l3.1-3A10 10 0 0 0 3.2 7.5L6.5 10A5.8 5.8 0 0 1 12 6Z"></path>
+              </svg>
+            </span>
+            <span>Google ile devam et</span>
+          </button>
+          <div id="google-loading" class="google-loading">
+            <span class="spinner"></span> Google hazırlanıyor...
+          </div>
+
+          <div id="setup-warning" class="setup-warning hidden">
+            <strong>Google Client ID gerekli</strong>
+            <span>
+              Proje kökünde <code>.env</code> oluşturup
+              <code>GOOGLE_CLIENT_ID=...apps.googleusercontent.com</code>
+              değerini ekle ve sunucuyu yeniden başlat.
+            </span>
+          </div>
+
+          <div id="google-error" class="setup-warning error hidden">
+            <strong>Google giriş servisi yüklenemedi</strong>
+            <span id="google-error-message">
+              İnternet bağlantını ve Google Cloud yetkili JavaScript kaynaklarını kontrol et.
+            </span>
+            <button id="google-retry-button" class="warning-action" type="button">Tekrar dene</button>
+          </div>
+
+          <div id="dev-login" class="dev-login hidden">
+            <div class="divider"><span>yerel test</span></div>
+            <form id="dev-login-form">
+              <label for="dev-name">Test kullanıcı adı</label>
+              <div class="inline-form">
+                <input id="dev-name" name="name" minlength="2" maxlength="40" placeholder="Örn. Fahri" required>
+                <button type="submit">Giriş</button>
+              </div>
+            </form>
+          </div>
+
+          <p class="legal">
+            Devam ederek kullanım koşullarını ve gizlilik politikasını kabul etmiş olursun.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <main id="app-view" class="app-view hidden">
+      <aside id="room-sidebar" class="room-sidebar">
+        <div class="sidebar-head">
+          <a class="brand" href="/">
+            <span class="brand-mark">K</span>
+            <span>Kanka Chat</span>
+          </a>
+          <button id="close-sidebar" class="icon-button mobile-only" aria-label="Menüyü kapat">
+            <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+          </button>
+        </div>
+
+        <div class="id-card">
+          <div>
+            <span>Senin Kanka ID'n</span>
+            <strong id="my-kanka-id">KANKA-------</strong>
+          </div>
+          <button id="copy-id" class="copy-button" aria-label="Kanka ID'yi kopyala">
+            <svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>
+          </button>
+        </div>
+
+        <div class="room-section">
+          <div class="section-title">
+            <span>SOHBET ODALARI</span>
+            <button id="new-room-button" class="mini-button" aria-label="Yeni oda oluştur">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
+            </button>
+          </div>
+          <nav id="room-list" class="room-list" aria-label="Sohbet odaları"></nav>
+        </div>
+
+        <div class="sidebar-profile">
+          <div id="my-avatar" class="avatar avatar-medium"></div>
+          <div class="profile-copy">
+            <strong id="my-name">Kullanıcı</strong>
+            <span><i class="status-dot"></i> Çevrimiçi</span>
+          </div>
+          <button id="logout-button" class="icon-button" aria-label="Çıkış yap" title="Çıkış yap">
+            <svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3"></path><path d="M14 4h5a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5"></path></svg>
+          </button>
+        </div>
+      </aside>
+
+      <section class="chat-shell">
+        <header class="chat-header">
+          <div class="room-heading">
+            <button id="open-sidebar" class="icon-button mobile-only" aria-label="Odaları aç">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+            </button>
+            <span class="room-symbol">#</span>
+            <div>
+              <h1 id="active-room-name">Sohbet Odası</h1>
+              <p id="active-room-subtitle">Arkadaşlarınla konuşmaya başla</p>
+            </div>
+          </div>
+          <div class="header-actions">
+            <button id="invite-button" class="primary-button">
+              <svg viewBox="0 0 24 24"><path d="M15 19a6 6 0 0 0-12 0M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM19 8v6M16 11h6"></path></svg>
+              Arkadaş davet et
+            </button>
+            <button id="toggle-members" class="icon-button member-toggle" aria-label="Üyeleri göster">
+              <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="chat-content">
+          <section class="messages-pane">
+            <div id="messages" class="messages" aria-live="polite"></div>
+            <div id="typing-indicator" class="typing-indicator"></div>
+            <form id="message-form" class="message-form">
+              <div class="composer-voice-controls">
+                <button id="join-voice-button" class="composer-voice-button join" type="button" aria-label="Sese katıl">
+                  <svg viewBox="0 0 24 24"><path d="M5 13a7 7 0 0 1 14 0v5M5 18h3v-6H5a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2ZM19 18h-3v-6h3a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2Z"></path></svg>
+                  <span>Sese Katıl</span>
+                </button>
+                <button id="mute-voice-button" class="composer-voice-button hidden" type="button" aria-label="Mikrofonu kapat">
+                  <svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8"></path></svg>
+                  <span>Mikrofonu Kapat</span>
+                </button>
+                <button id="leave-voice-button" class="composer-voice-button danger hidden" type="button" aria-label="Sesten ayrıl">
+                  <svg viewBox="0 0 24 24"><path d="M4 4l16 16M9 9v3a3 3 0 0 0 4.5 2.6M15 9V5a3 3 0 0 0-5.8-1M19 10v2a7 7 0 0 1-11.7 5.2M12 19v3M8 22h8"></path></svg>
+                  <span>Sesten Ayrıl</span>
+                </button>
+                <span id="voice-status" class="voice-status"></span>
+              </div>
+              <span class="composer-divider" aria-hidden="true"></span>
+              <textarea id="message-input" rows="1" maxlength="2000" placeholder="Mesaj yaz..." aria-label="Mesaj"></textarea>
+              <span id="message-count" class="message-count"></span>
+              <button type="submit" class="send-button" aria-label="Mesajı gönder">
+                <svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></svg>
+              </button>
+            </form>
+          </section>
+
+          <aside id="members-panel" class="members-panel">
+            <div class="members-title">
+              <span>ODA ÜYELERİ</span>
+              <strong id="member-count">0</strong>
+            </div>
+            <div id="member-list" class="member-list"></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <div id="voice-audio-root" class="voice-audio-root" aria-hidden="true"></div>
+
+    <div id="modal-backdrop" class="modal-backdrop hidden">
+      <section id="create-room-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="create-room-title">
+        <button class="modal-close" data-close-modal aria-label="Kapat">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+        <span class="modal-icon">#</span>
+        <h2 id="create-room-title">Yeni oda oluştur</h2>
+        <p>Ekibine uygun kısa ve akılda kalan bir oda adı seç.</p>
+        <form id="create-room-form">
+          <label for="room-name">Oda adı</label>
+          <input id="room-name" name="name" minlength="2" maxlength="40" placeholder="Örn. Gece ekibi" required>
+          <button class="primary-button wide" type="submit">Odayı oluştur</button>
+        </form>
+      </section>
+
+      <section id="invite-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="invite-title">
+        <button class="modal-close" data-close-modal aria-label="Kapat">
+          <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+        <span class="modal-icon">
+          <svg viewBox="0 0 24 24"><path d="M15 19a6 6 0 0 0-12 0M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM19 8v6M16 11h6"></path></svg>
+        </span>
+        <h2 id="invite-title">Arkadaşını davet et</h2>
+        <p>Arkadaşının profilinde görünen Kanka ID'yi gir.</p>
+        <form id="invite-form">
+          <label for="invite-id">Kanka ID</label>
+          <input id="invite-id" name="kankaId" maxlength="12" placeholder="KANKA-ABC123" autocomplete="off" required>
+          <button class="primary-button wide" type="submit">Odaya davet et</button>
+        </form>
+      </section>
+    </div>
+  </body>
+</html>
