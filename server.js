@@ -45,7 +45,11 @@ const oauthClient = new OAuth2Client(GOOGLE_CLIENT_ID || undefined);
 
 const sessions = new Map();
 const eventClients = new Map();
+const presenceGraceTimers = new Map();
 const voiceRooms = new Map();
+const voiceGraceTimers = new Map();
+const USER_PRESENCE_GRACE_MS = 12_000;
+const VOICE_RECONNECT_GRACE_MS = 10_000;
 let saveTimer = null;
 let state = loadState();
 
@@ -68,7 +72,7 @@ function loadState() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   if (!fs.existsSync(STATE_FILE)) {
-    return { users: [], rooms: [], messages: [] };
+    return { users: [], rooms: [], messages: [], friendRequests: [] };
   }
 
   try {
@@ -77,10 +81,13 @@ function loadState() {
       users: Array.isArray(parsed.users) ? parsed.users.map(normalizeUser) : [],
       rooms: Array.isArray(parsed.rooms) ? parsed.rooms : [],
       messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+      friendRequests: Array.isArray(parsed.friendRequests)
+        ? parsed.friendRequests.map(normalizeFriendRequest)
+        : [],
     };
   } catch (error) {
     console.error("Veri dosyasi okunamadi, bos durumla baslatiliyor:", error.message);
-    return { users: [], rooms: [], messages: [] };
+    return { users: [], rooms: [], messages: [], friendRequests: [] };
   }
 }
 
@@ -91,6 +98,23 @@ function normalizeUser(user) {
     bio: String(user.bio || "").slice(0, 160),
     statusMessage: String(user.statusMessage || "").slice(0, 60),
     theme: user.theme === "light" ? "light" : "dark",
+    friends: Array.isArray(user.friends)
+      ? [...new Set(user.friends.filter((id) => typeof id === "string"))]
+      : [],
+  };
+}
+
+function normalizeFriendRequest(request) {
+  const status = ["pending", "accepted", "rejected"].includes(request.status)
+    ? request.status
+    : "pending";
+  return {
+    id: typeof request.id === "string" ? request.id : newId("freq"),
+    fromUserId: String(request.fromUserId || ""),
+    toUserId: String(request.toUserId || ""),
+    status,
+    createdAt: request.createdAt || new Date().toISOString(),
+    respondedAt: request.respondedAt || null,
   };
 }
 
@@ -225,6 +249,7 @@ function publicUser(user) {
     kankaId: user.kankaId,
     bio: user.bio || "",
     statusMessage: user.statusMessage || "",
+    createdAt: user.createdAt || "",
   };
 }
 
@@ -276,6 +301,7 @@ function upsertUser(profile) {
       bio: "",
       statusMessage: "",
       theme: "dark",
+      friends: [],
       createdAt: new Date().toISOString(),
     };
     state.users.push(user);
@@ -296,6 +322,7 @@ function upsertUser(profile) {
     user.bio ||= "";
     user.statusMessage ||= "";
     user.theme = user.theme === "light" ? "light" : "dark";
+    if (!Array.isArray(user.friends)) user.friends = [];
   }
   scheduleSave();
   return user;
@@ -439,6 +466,110 @@ function usersSharingRoomsWith(userId) {
   );
 }
 
+function friendIdsFor(userId) {
+  const user = state.users.find((entry) => entry.id === userId);
+  return new Set(Array.isArray(user?.friends) ? user.friends : []);
+}
+
+function areFriends(userId, otherUserId) {
+  return friendIdsFor(userId).has(otherUserId) && friendIdsFor(otherUserId).has(userId);
+}
+
+function pendingFriendRequestBetween(userId, otherUserId) {
+  return state.friendRequests.find((request) => (
+    request.status === "pending"
+    && (
+      (request.fromUserId === userId && request.toUserId === otherUserId)
+      || (request.fromUserId === otherUserId && request.toUserId === userId)
+    )
+  ));
+}
+
+function friendRelationship(viewerId, targetId) {
+  if (viewerId === targetId) return { status: "self", request: null };
+  if (areFriends(viewerId, targetId)) return { status: "friends", request: null };
+  const request = pendingFriendRequestBetween(viewerId, targetId);
+  if (!request) return { status: "none", request: null };
+  return {
+    status: request.fromUserId === viewerId ? "pending_sent" : "pending_received",
+    request,
+  };
+}
+
+function voiceActivityForUser(userId) {
+  for (const [roomId, peers] of voiceRooms.entries()) {
+    const activePeer = [...peers.values()].find((peer) => (
+      peer.user?.id === userId && !peer.isDisconnected
+    ));
+    if (activePeer) {
+      const room = state.rooms.find((entry) => entry.id === roomId);
+      return room ? `${room.name} odasinda seste` : "Seste";
+    }
+  }
+  return onlineUserIds().includes(userId) ? "Cevrimici" : "Cevrimdisi";
+}
+
+function profileForViewer(user, viewerId) {
+  const relationship = friendRelationship(viewerId, user.id);
+  const detailed = relationship.status === "self" || relationship.status === "friends";
+  return {
+    id: user.id,
+    name: user.displayName || user.name,
+    picture: user.picture || "",
+    kankaId: user.kankaId,
+    bio: user.bio || "",
+    statusMessage: detailed ? user.statusMessage || "" : "",
+    createdAt: user.createdAt || "",
+    online: onlineUserIds().includes(user.id),
+    relationship: relationship.status,
+    friendRequestId: relationship.request?.id || null,
+    activity: detailed ? voiceActivityForUser(user.id) : "",
+  };
+}
+
+function friendRequestPayload(request) {
+  const fromUser = state.users.find((user) => user.id === request.fromUserId);
+  const toUser = state.users.find((user) => user.id === request.toUserId);
+  return {
+    id: request.id,
+    status: request.status,
+    createdAt: request.createdAt,
+    respondedAt: request.respondedAt,
+    from: fromUser ? publicUser(fromUser) : null,
+    to: toUser ? publicUser(toUser) : null,
+  };
+}
+
+function friendsPayload(userId) {
+  const friendIds = friendIdsFor(userId);
+  return {
+    friends: [...friendIds]
+      .map((id) => state.users.find((user) => user.id === id))
+      .filter(Boolean)
+      .map(publicUser),
+    incomingFriendRequests: state.friendRequests
+      .filter((request) => request.status === "pending" && request.toUserId === userId)
+      .map(friendRequestPayload),
+    outgoingFriendRequests: state.friendRequests
+      .filter((request) => request.status === "pending" && request.fromUserId === userId)
+      .map(friendRequestPayload),
+  };
+}
+
+function addMutualFriend(userId, otherUserId) {
+  const user = state.users.find((entry) => entry.id === userId);
+  const otherUser = state.users.find((entry) => entry.id === otherUserId);
+  if (!user || !otherUser) return;
+  if (!Array.isArray(user.friends)) user.friends = [];
+  if (!Array.isArray(otherUser.friends)) otherUser.friends = [];
+  if (!user.friends.includes(otherUserId)) user.friends.push(otherUserId);
+  if (!otherUser.friends.includes(userId)) otherUser.friends.push(userId);
+}
+
+function notifyFriendsChanged(userIds) {
+  broadcastToUsers(userIds, "friends-updated", {});
+}
+
 function roomForUser(roomId, userId) {
   return state.rooms.find(
     (room) => room.id === roomId && room.memberIds.includes(userId),
@@ -466,9 +597,12 @@ function userRooms(userId) {
 }
 
 function onlineUserIds() {
-  return [...eventClients.entries()]
-    .filter(([, connections]) => connections.size > 0)
-    .map(([userId]) => userId);
+  return [...new Set([
+    ...[...eventClients.entries()]
+      .filter(([, connections]) => connections.size > 0)
+      .map(([userId]) => userId),
+    ...presenceGraceTimers.keys(),
+  ])];
 }
 
 function writeEvent(res, event, payload) {
@@ -503,6 +637,7 @@ function voicePeerPayload(socket) {
     muted: Boolean(socket.muted),
     cameraEnabled: Boolean(socket.cameraEnabled),
     screenSharing: Boolean(socket.screenSharing),
+    disconnected: Boolean(socket.isDisconnected),
   };
 }
 
@@ -526,10 +661,55 @@ function sendVoicePresence(roomId) {
   });
 }
 
+function voiceGraceKey(roomId, peerId) {
+  return `${roomId}:${peerId}`;
+}
+
+function clearVoiceGraceTimer(roomId, peerId) {
+  const key = voiceGraceKey(roomId, peerId);
+  const timer = voiceGraceTimers.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  voiceGraceTimers.delete(key);
+}
+
+function scheduleVoiceDisconnect(socket) {
+  if (!socket.voiceRoomId) return;
+
+  const roomId = socket.voiceRoomId;
+  socket.isDisconnected = true;
+  clearVoiceGraceTimer(roomId, socket.peerId);
+
+  const key = voiceGraceKey(roomId, socket.peerId);
+  const timer = setTimeout(() => {
+    voiceGraceTimers.delete(key);
+    if (socket.voiceRoomId === roomId && socket.isDisconnected) {
+      leaveVoiceRoom(socket);
+    }
+  }, VOICE_RECONNECT_GRACE_MS);
+  voiceGraceTimers.set(key, timer);
+
+  broadcastVoiceRoom(roomId, {
+    type: "voice-peer-paused",
+    roomId,
+    peerId: socket.peerId,
+  }, socket);
+  sendVoicePresence(roomId);
+}
+
+function findDisconnectedVoicePeer(roomId, userId) {
+  const peers = voiceRooms.get(roomId);
+  if (!peers) return null;
+  return [...peers.values()].find((peer) => (
+    peer.user?.id === userId && peer.isDisconnected
+  )) || null;
+}
+
 function leaveVoiceRoom(socket) {
   if (!socket.voiceRoomId) return;
 
   const roomId = socket.voiceRoomId;
+  clearVoiceGraceTimer(roomId, socket.peerId);
   const peers = voiceRooms.get(roomId);
   if (peers) {
     peers.delete(socket.peerId);
@@ -537,6 +717,7 @@ function leaveVoiceRoom(socket) {
   }
 
   socket.voiceRoomId = null;
+  socket.isDisconnected = false;
   broadcastVoiceRoom(roomId, {
     type: "voice-peer-left",
     roomId,
@@ -545,7 +726,17 @@ function leaveVoiceRoom(socket) {
   sendVoicePresence(roomId);
 }
 
-function joinVoiceRoom(socket, roomId) {
+function closeDuplicateVoicePeerForUser(roomId, userId, exceptSocket) {
+  const peers = voiceRooms.get(roomId);
+  if (!peers) return;
+  for (const socket of [...peers.values()]) {
+    if (socket === exceptSocket || socket.user.id !== userId || socket.isDisconnected) continue;
+    clearVoiceGraceTimer(roomId, socket.peerId);
+    leaveVoiceRoom(socket);
+  }
+}
+
+function joinVoiceRoom(socket, roomId, options = {}) {
   const room = roomForUser(roomId, socket.user.id);
   if (!room) {
     sendSocket(socket, {
@@ -555,15 +746,38 @@ function joinVoiceRoom(socket, roomId) {
     return;
   }
 
-  leaveVoiceRoom(socket);
+  if (socket.voiceRoomId && socket.voiceRoomId !== roomId) leaveVoiceRoom(socket);
   if (!voiceRooms.has(roomId)) voiceRooms.set(roomId, new Map());
   const peers = voiceRooms.get(roomId);
-  const existingPeers = [...peers.values()].map(voicePeerPayload);
+  const disconnectedPeer = findDisconnectedVoicePeer(roomId, socket.user.id);
+  const reconnected = Boolean(disconnectedPeer && disconnectedPeer !== socket);
+
+  if (disconnectedPeer && disconnectedPeer !== socket) {
+    clearVoiceGraceTimer(roomId, disconnectedPeer.peerId);
+    peers.delete(disconnectedPeer.peerId);
+    socket.peerId = disconnectedPeer.peerId;
+    socket.muted = disconnectedPeer.muted;
+    socket.cameraEnabled = disconnectedPeer.cameraEnabled;
+    socket.screenSharing = disconnectedPeer.screenSharing;
+  } else if (socket.voiceRoomId === roomId) {
+    peers.delete(socket.peerId);
+  } else {
+    closeDuplicateVoicePeerForUser(roomId, socket.user.id, socket);
+  }
+
+  const existingPeers = [...peers.values()]
+    .filter((peer) => !peer.isDisconnected)
+    .map(voicePeerPayload);
 
   socket.voiceRoomId = roomId;
-  socket.muted = false;
-  socket.cameraEnabled = false;
-  socket.screenSharing = false;
+  socket.muted = typeof options.muted === "boolean" ? options.muted : Boolean(socket.muted);
+  socket.cameraEnabled = typeof options.cameraEnabled === "boolean"
+    ? options.cameraEnabled
+    : Boolean(socket.cameraEnabled);
+  socket.screenSharing = typeof options.screenSharing === "boolean"
+    ? options.screenSharing
+    : Boolean(socket.screenSharing);
+  socket.isDisconnected = false;
   peers.set(socket.peerId, socket);
 
   sendSocket(socket, {
@@ -571,9 +785,10 @@ function joinVoiceRoom(socket, roomId) {
     roomId,
     peerId: socket.peerId,
     peers: existingPeers,
+    reconnected,
   });
   broadcastVoiceRoom(roomId, {
-    type: "voice-peer-joined",
+    type: reconnected ? "voice-peer-reconnected" : "voice-peer-joined",
     roomId,
     peer: voicePeerPayload(socket),
   }, socket);
@@ -618,7 +833,15 @@ function handleVoiceSocketMessage(socket, rawMessage) {
   }
 
   if (message.type === "join-voice" && typeof message.roomId === "string") {
-    joinVoiceRoom(socket, message.roomId);
+    joinVoiceRoom(socket, message.roomId, {
+      muted: typeof message.muted === "boolean" ? message.muted : undefined,
+      cameraEnabled: typeof message.cameraEnabled === "boolean"
+        ? message.cameraEnabled
+        : undefined,
+      screenSharing: typeof message.screenSharing === "boolean"
+        ? message.screenSharing
+        : undefined,
+    });
     return;
   }
   if (message.type === "leave-voice") {
@@ -657,6 +880,11 @@ function notifyRoomMembers(room, event, payload) {
 }
 
 function addEventClient(userId, res) {
+  const graceTimer = presenceGraceTimers.get(userId);
+  if (graceTimer) {
+    clearTimeout(graceTimer);
+    presenceGraceTimers.delete(userId);
+  }
   if (!eventClients.has(userId)) eventClients.set(userId, new Set());
   eventClients.get(userId).add(res);
   broadcastPresence();
@@ -666,8 +894,14 @@ function removeEventClient(userId, res) {
   const connections = eventClients.get(userId);
   if (!connections) return;
   connections.delete(res);
-  if (connections.size === 0) eventClients.delete(userId);
-  broadcastPresence();
+  if (connections.size > 0) return;
+  const graceTimer = setTimeout(() => {
+    presenceGraceTimers.delete(userId);
+    const latestConnections = eventClients.get(userId);
+    if (latestConnections && latestConnections.size === 0) eventClients.delete(userId);
+    broadcastPresence();
+  }, USER_PRESENCE_GRACE_MS);
+  presenceGraceTimers.set(userId, graceTimer);
 }
 
 async function handleGoogleLogin(req, res) {
@@ -773,10 +1007,12 @@ async function apiHandler(req, res, url) {
   if (!auth) return;
 
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
+    const social = friendsPayload(auth.user.id);
     sendJson(res, 200, {
       me: ownUser(auth.user),
       rooms: userRooms(auth.user.id),
       onlineUserIds: onlineUserIds(),
+      ...social,
     });
     return;
   }
@@ -802,10 +1038,87 @@ async function apiHandler(req, res, url) {
     scheduleSave();
 
     const sharedUserIds = usersSharingRoomsWith(auth.user.id);
+    for (const friendId of friendIdsFor(auth.user.id)) sharedUserIds.add(friendId);
     broadcastToUsers(sharedUserIds, "profile-updated", {
       user: publicUser(auth.user),
     });
     sendJson(res, 200, { user: ownUser(auth.user) });
+    return;
+  }
+
+  const profileMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/profile$/);
+  if (profileMatch && req.method === "GET") {
+    const targetUser = state.users.find((user) => user.id === profileMatch[1]);
+    if (!targetUser) {
+      sendError(res, 404, "Kullanici bulunamadi.");
+      return;
+    }
+    sendJson(res, 200, { profile: profileForViewer(targetUser, auth.user.id) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/friends") {
+    sendJson(res, 200, friendsPayload(auth.user.id));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/friends/requests") {
+    const body = await readJson(req);
+    const targetUser = state.users.find((user) => (
+      user.id === body.userId
+      || user.kankaId === String(body.kankaId || "").trim().toUpperCase()
+    ));
+    if (!targetUser) {
+      sendError(res, 404, "Kullanici bulunamadi.");
+      return;
+    }
+    if (targetUser.id === auth.user.id) {
+      sendError(res, 400, "Kendine arkadaslik istegi gonderemezsin.");
+      return;
+    }
+    if (areFriends(auth.user.id, targetUser.id)) {
+      sendError(res, 409, "Bu kullanici zaten arkadasin.");
+      return;
+    }
+    const existingRequest = pendingFriendRequestBetween(auth.user.id, targetUser.id);
+    if (existingRequest) {
+      sendError(res, 409, "Bu kullaniciyle bekleyen bir arkadaslik istegi var.");
+      return;
+    }
+
+    const request = {
+      id: newId("freq"),
+      fromUserId: auth.user.id,
+      toUserId: targetUser.id,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      respondedAt: null,
+    };
+    state.friendRequests.push(request);
+    scheduleSave();
+    notifyFriendsChanged([auth.user.id, targetUser.id]);
+    sendJson(res, 201, { request: friendRequestPayload(request) });
+    return;
+  }
+
+  const friendActionMatch = url.pathname.match(/^\/api\/friends\/requests\/([^/]+)\/(accept|reject)$/);
+  if (friendActionMatch && req.method === "POST") {
+    const request = state.friendRequests.find((entry) => entry.id === friendActionMatch[1]);
+    if (!request || request.status !== "pending") {
+      sendError(res, 404, "Bekleyen istek bulunamadi.");
+      return;
+    }
+    if (request.toUserId !== auth.user.id) {
+      sendError(res, 403, "Bu istegi yanitlama yetkin yok.");
+      return;
+    }
+
+    request.status = friendActionMatch[2] === "accept" ? "accepted" : "rejected";
+    request.respondedAt = new Date().toISOString();
+    if (request.status === "accepted") addMutualFriend(request.fromUserId, request.toUserId);
+    scheduleSave();
+    notifyFriendsChanged([request.fromUserId, request.toUserId]);
+    sendJson(res, 200, friendsPayload(auth.user.id));
     return;
   }
 
@@ -1125,6 +1438,7 @@ server.on("upgrade", (req, socket, head) => {
     webSocket.muted = false;
     webSocket.cameraEnabled = false;
     webSocket.screenSharing = false;
+    webSocket.isDisconnected = false;
     voiceSocketServer.emit("connection", webSocket, req);
   });
 });
@@ -1132,7 +1446,7 @@ server.on("upgrade", (req, socket, head) => {
 voiceSocketServer.on("connection", (socket) => {
   sendSocket(socket, { type: "voice-ready", peerId: socket.peerId });
   socket.on("message", (message) => handleVoiceSocketMessage(socket, message));
-  socket.on("close", () => leaveVoiceRoom(socket));
+  socket.on("close", () => scheduleVoiceDisconnect(socket));
   socket.on("error", (error) => {
     console.error("Ses WebSocket hatasi:", error.message);
   });

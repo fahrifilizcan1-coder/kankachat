@@ -5,9 +5,20 @@ const state = {
   activeRoomId: null,
   messages: [],
   onlineUserIds: new Set(),
+  friends: [],
+  incomingFriendRequests: [],
+  outgoingFriendRequests: [],
   unread: new Map(),
   typing: new Map(),
   eventSource: null,
+  eventReconnectTimer: null,
+  eventReconnectAttempts: 0,
+  browserOffline: false,
+  activeProfile: null,
+  connection: {
+    events: "offline",
+    voice: "connected",
+  },
   lastTypingSentAt: 0,
   voice: {
     socket: null,
@@ -17,6 +28,11 @@ const state = {
     selfPeerId: null,
     joined: false,
     joining: false,
+    reconnecting: false,
+    manualDisconnect: false,
+    desiredRoomId: null,
+    reconnectAttempts: 0,
+    reconnectTimer: null,
     muted: false,
     cameraEnabled: false,
     screenSharing: false,
@@ -62,8 +78,12 @@ const elements = {
   myStatus: document.querySelector("#my-status"),
   myAvatar: document.querySelector("#my-avatar"),
   roomList: document.querySelector("#room-list"),
+  friendList: document.querySelector("#friend-list"),
+  friendRequestList: document.querySelector("#friend-request-list"),
+  friendRequestCount: document.querySelector("#friend-request-count"),
   activeRoomName: document.querySelector("#active-room-name"),
   activeRoomSubtitle: document.querySelector("#active-room-subtitle"),
+  connectionStatus: document.querySelector("#connection-status"),
   messages: document.querySelector("#messages"),
   memberList: document.querySelector("#member-list"),
   memberCount: document.querySelector("#member-count"),
@@ -106,11 +126,16 @@ const elements = {
   viewProfileName: document.querySelector("#view-profile-name"),
   viewProfileStatus: document.querySelector("#view-profile-status"),
   viewProfileBio: document.querySelector("#view-profile-bio"),
+  viewProfileRelationship: document.querySelector("#view-profile-relationship"),
+  viewProfileDetails: document.querySelector("#view-profile-details"),
   viewProfileKankaId: document.querySelector("#view-profile-kanka-id"),
+  profileFriendAction: document.querySelector("#profile-friend-action"),
+  profileFriendSecondaryAction: document.querySelector("#profile-friend-secondary-action"),
   settingsModal: document.querySelector("#settings-modal"),
 };
 
 document.addEventListener("DOMContentLoaded", initialize);
+setInterval(checkConnectionHealth, 5_000);
 
 function on(element, eventName, handler, selector, options) {
   if (!element) return false;
@@ -174,6 +199,45 @@ async function api(path, options = {}) {
   return body;
 }
 
+function setConnectionState(channel, value) {
+  state.connection[channel] = value;
+  renderConnectionStatus();
+}
+
+function renderConnectionStatus() {
+  if (!elements.connectionStatus) return;
+  const values = Object.values(state.connection);
+  let mode = "connected";
+  let label = "Bağlandı";
+  if (values.includes("offline")) {
+    mode = "offline";
+    label = "Çevrimdışı";
+  } else if (values.includes("reconnecting")) {
+    mode = "reconnecting";
+    label = "Yeniden bağlanıyor";
+  }
+  elements.connectionStatus.className = `connection-status ${mode}`;
+  elements.connectionStatus.querySelector("strong").textContent = label;
+}
+
+async function checkConnectionHealth() {
+  if (!state.me) return;
+  if (state.connection.events === "connected" && state.connection.voice === "connected") return;
+  try {
+    const response = await fetch("/api/config", {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    if (!response.ok) return;
+    state.browserOffline = false;
+    if (state.connection.events === "offline") setConnectionState("events", "connected");
+    if (!state.eventSource || state.eventSource.readyState === EventSource.CLOSED) {
+      scheduleEventsReconnect(100);
+    }
+    if (state.voice.reconnecting) scheduleVoiceReconnect(100);
+  } catch {}
+}
+
 function bindEvents() {
   on(elements.devLoginForm, "submit", handleDevLogin, "#dev-login-form");
   on(elements.messageForm, "submit", sendMessage, "#message-form");
@@ -203,6 +267,22 @@ function bindEvents() {
   }, "#modal-backdrop");
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeModals();
+  });
+  window.addEventListener("online", () => {
+    state.browserOffline = false;
+    setConnectionState("events", state.eventSource ? "reconnecting" : "connected");
+    if (!state.eventSource && state.me) scheduleEventsReconnect(100);
+    if (state.voice.reconnecting) scheduleVoiceReconnect(300);
+  });
+  window.addEventListener("offline", () => {
+    state.browserOffline = true;
+    setConnectionState("events", "offline");
+    setConnectionState(
+      "voice",
+      state.voice.joined || state.voice.joining || state.voice.reconnecting
+        ? "offline"
+        : "connected",
+    );
   });
 
   on(document.querySelector("#copy-id"), "click", copyKankaId, "#copy-id");
@@ -240,6 +320,13 @@ function bindEvents() {
   on(document.querySelector("#open-profile-button"), "click", openOwnProfile, "#open-profile-button");
   on(document.querySelector("#settings-button"), "click", openSettings, "#settings-button");
   on(elements.profileForm, "submit", saveProfile, "#profile-form");
+  on(elements.profileFriendAction, "click", handleProfileFriendAction, "#profile-friend-action");
+  on(
+    elements.profileFriendSecondaryAction,
+    "click",
+    handleProfileFriendSecondaryAction,
+    "#profile-friend-secondary-action",
+  );
   on(elements.fileButton, "click", () => elements.fileInput?.click(), "#file-button");
   on(elements.fileInput, "change", handleFileSelection, "#file-input");
   document.querySelectorAll("[data-theme-choice]").forEach((button) => {
@@ -433,6 +520,7 @@ async function enterApp() {
   state.me = bootstrap.me;
   state.rooms = bootstrap.rooms;
   state.onlineUserIds = new Set(bootstrap.onlineUserIds);
+  applySocialState(bootstrap);
   applyTheme(state.me.theme);
 
   if (!state.activeRoomId || !getActiveRoom()) {
@@ -443,6 +531,7 @@ async function enterApp() {
   elements.appView.classList.remove("hidden");
   renderProfile();
   renderRooms();
+  renderSocial();
   renderVoiceControls();
   connectEvents();
 
@@ -513,18 +602,230 @@ async function saveProfile(event) {
   }
 }
 
-function openUserProfile(user) {
+async function openUserProfile(user) {
   if (!user) return;
   if (user.id === state.me.id) {
     openOwnProfile();
     return;
   }
+  state.activeProfile = {
+    id: user.id,
+    relationship: "loading",
+    friendRequestId: null,
+  };
   renderAvatar(elements.viewProfileAvatar, user);
   elements.viewProfileName.textContent = user.name;
   elements.viewProfileStatus.textContent = user.statusMessage || "Çevrimiçi";
   elements.viewProfileBio.textContent = user.bio || "Henüz bio eklenmemiş.";
   elements.viewProfileKankaId.textContent = user.kankaId;
+  elements.viewProfileRelationship.textContent = "";
+  elements.viewProfileDetails.innerHTML = "";
+  renderProfileFriendActions();
   openModal(elements.userProfileModal);
+
+  try {
+    const response = await api(`/api/users/${encodeURIComponent(user.id)}/profile`);
+    if (state.activeProfile?.id !== user.id) return;
+    state.activeProfile = response.profile;
+    renderPublicProfile(response.profile);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function applySocialState(payload = {}) {
+  state.friends = Array.isArray(payload.friends) ? payload.friends : [];
+  state.incomingFriendRequests = Array.isArray(payload.incomingFriendRequests)
+    ? payload.incomingFriendRequests
+    : [];
+  state.outgoingFriendRequests = Array.isArray(payload.outgoingFriendRequests)
+    ? payload.outgoingFriendRequests
+    : [];
+}
+
+async function refreshSocial() {
+  const payload = await api("/api/friends");
+  applySocialState(payload);
+  renderSocial();
+}
+
+function renderSocial() {
+  if (!elements.friendList || !elements.friendRequestList) return;
+  elements.friendList.innerHTML = "";
+  elements.friendRequestList.innerHTML = "";
+  const requestCount = state.incomingFriendRequests.length;
+  elements.friendRequestCount.textContent = String(requestCount);
+  elements.friendRequestCount.classList.toggle("hidden", requestCount === 0);
+
+  for (const request of state.incomingFriendRequests) {
+    if (!request.from) continue;
+    elements.friendRequestList.append(createFriendRequestCard(request));
+  }
+
+  for (const request of state.outgoingFriendRequests) {
+    if (!request.to) continue;
+    const item = document.createElement("button");
+    item.className = "friend-item pending";
+    item.type = "button";
+    item.textContent = `${request.to.name} - istek gönderildi`;
+    item.addEventListener("click", () => openUserProfile(request.to));
+    elements.friendRequestList.append(item);
+  }
+
+  if (!state.friends.length) {
+    const empty = document.createElement("p");
+    empty.className = "social-empty";
+    empty.textContent = "Henüz arkadaş eklenmedi.";
+    elements.friendList.append(empty);
+    return;
+  }
+
+  for (const friend of state.friends) {
+    const item = document.createElement("button");
+    item.className = "friend-item";
+    item.type = "button";
+    const avatar = document.createElement("div");
+    avatar.className = "avatar avatar-friend";
+    renderAvatar(avatar, friend, state.onlineUserIds.has(friend.id));
+    const name = document.createElement("span");
+    name.textContent = friend.name;
+    item.append(avatar, name);
+    item.addEventListener("click", () => openUserProfile(friend));
+    elements.friendList.append(item);
+  }
+}
+
+function createFriendRequestCard(request) {
+  const card = document.createElement("div");
+  card.className = "friend-request-card";
+  const userButton = document.createElement("button");
+  userButton.className = "friend-request-user";
+  userButton.type = "button";
+  userButton.textContent = request.from.name;
+  userButton.addEventListener("click", () => openUserProfile(request.from));
+  const actions = document.createElement("div");
+  actions.className = "friend-request-actions";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.textContent = "Kabul";
+  accept.addEventListener("click", () => answerFriendRequest(request.id, "accept"));
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.textContent = "Reddet";
+  reject.addEventListener("click", () => answerFriendRequest(request.id, "reject"));
+  actions.append(accept, reject);
+  card.append(userButton, actions);
+  return card;
+}
+
+function renderPublicProfile(profile) {
+  renderAvatar(elements.viewProfileAvatar, profile);
+  elements.viewProfileName.textContent = profile.name;
+  elements.viewProfileStatus.textContent = profile.statusMessage
+    || (profile.online ? "Çevrimiçi" : "Çevrimdışı");
+  elements.viewProfileRelationship.textContent = relationshipLabel(profile.relationship);
+  elements.viewProfileBio.textContent = profile.bio || "Henüz bio eklenmemiş.";
+  elements.viewProfileKankaId.textContent = profile.kankaId;
+  elements.viewProfileDetails.innerHTML = "";
+  addProfileDetail("Katılma", formatDate(profile.createdAt), elements.viewProfileDetails);
+  addProfileDetail("Durum", profile.online ? "Çevrimiçi" : "Çevrimdışı", elements.viewProfileDetails);
+  if (profile.activity) addProfileDetail("Aktivite", profile.activity, elements.viewProfileDetails);
+  renderProfileFriendActions();
+}
+
+function addProfileDetail(label, value, root) {
+  const item = document.createElement("div");
+  const title = document.createElement("span");
+  title.textContent = label;
+  const text = document.createElement("strong");
+  text.textContent = value || "-";
+  item.append(title, text);
+  root.append(item);
+}
+
+function relationshipLabel(status) {
+  return {
+    self: "Bu senin profilin",
+    friends: "Arkadaşın",
+    pending_sent: "Arkadaşlık isteği gönderildi",
+    pending_received: "Senden arkadaşlık isteği bekliyor",
+    loading: "Profil yükleniyor",
+    none: "Temel profil",
+  }[status] || "Temel profil";
+}
+
+function renderProfileFriendActions() {
+  const profile = state.activeProfile;
+  if (!profile || profile.relationship === "self" || profile.relationship === "loading") {
+    elements.profileFriendAction.classList.add("hidden");
+    elements.profileFriendSecondaryAction.classList.add("hidden");
+    return;
+  }
+  elements.profileFriendAction.classList.remove("hidden");
+  elements.profileFriendSecondaryAction.classList.add("hidden");
+  elements.profileFriendAction.disabled = false;
+  elements.profileFriendSecondaryAction.disabled = false;
+  if (profile.relationship === "friends") {
+    elements.profileFriendAction.textContent = "Arkadaşsınız";
+    elements.profileFriendAction.disabled = true;
+  } else if (profile.relationship === "pending_sent") {
+    elements.profileFriendAction.textContent = "İstek gönderildi";
+    elements.profileFriendAction.disabled = true;
+  } else if (profile.relationship === "pending_received") {
+    elements.profileFriendAction.textContent = "İsteği kabul et";
+    elements.profileFriendSecondaryAction.textContent = "Reddet";
+    elements.profileFriendSecondaryAction.classList.remove("hidden");
+  } else {
+    elements.profileFriendAction.textContent = "Arkadaş ekle";
+  }
+}
+
+async function handleProfileFriendAction() {
+  const profile = state.activeProfile;
+  if (!profile) return;
+  try {
+    if (profile.relationship === "pending_received") {
+      await answerFriendRequest(profile.friendRequestId, "accept");
+    } else if (profile.relationship === "none") {
+      await api("/api/friends/requests", {
+        method: "POST",
+        body: JSON.stringify({ userId: profile.id }),
+      });
+      await refreshSocial();
+      await openUserProfile({ id: profile.id });
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function handleProfileFriendSecondaryAction() {
+  const profile = state.activeProfile;
+  if (!profile || profile.relationship !== "pending_received") return;
+  await answerFriendRequest(profile.friendRequestId, "reject");
+}
+
+async function answerFriendRequest(requestId, action) {
+  try {
+    const payload = await api(`/api/friends/requests/${encodeURIComponent(requestId)}/${action}`, {
+      method: "POST",
+      body: "{}",
+    });
+    applySocialState(payload);
+    renderSocial();
+    if (state.activeProfile?.id) await openUserProfile({ id: state.activeProfile.id });
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function formatDate(value) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(value));
 }
 
 function openSettings() {
@@ -693,6 +994,7 @@ function createMessageElement(message, compact = false) {
   });
 
   const body = document.createElement("div");
+  body.className = "message-body";
   const meta = document.createElement("div");
   meta.className = "message-meta";
   const author = document.createElement("span");
@@ -950,7 +1252,10 @@ const RTC_CONFIGURATION = {
 
 function connectVoiceSocket() {
   const currentSocket = state.voice.socket;
-  if (currentSocket?.readyState === WebSocket.OPEN) return Promise.resolve(currentSocket);
+  if (currentSocket?.readyState === WebSocket.OPEN) {
+    setConnectionState("voice", "connected");
+    return Promise.resolve(currentSocket);
+  }
   if (currentSocket?.readyState === WebSocket.CONNECTING && state.voice.socketPromise) {
     return state.voice.socketPromise;
   }
@@ -959,9 +1264,20 @@ function connectVoiceSocket() {
   const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
   state.voice.socket = socket;
   state.voice.socketPromise = new Promise((resolve, reject) => {
-    socket.addEventListener("open", () => resolve(socket), { once: true });
-    socket.addEventListener("error", () => {
-      if (socket.readyState !== WebSocket.OPEN) {
+    socket.addEventListener("open", () => {
+      state.browserOffline = false;
+      if (state.connection.events === "offline") {
+        setConnectionState("events", "reconnecting");
+      }
+      if (!state.eventSource || state.eventSource.readyState === EventSource.CLOSED) {
+        scheduleEventsReconnect(100);
+      }
+      setConnectionState("voice", "connected");
+      resolve(socket);
+    }, { once: true });
+  socket.addEventListener("error", () => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      setConnectionState("voice", state.browserOffline ? "offline" : "reconnecting");
         reject(new Error("Ses sunucusuna bağlanılamadı."));
       }
     }, { once: true });
@@ -969,6 +1285,18 @@ function connectVoiceSocket() {
 
   socket.addEventListener("message", handleVoiceSocketMessage);
   socket.addEventListener("close", () => {
+    if (state.voice.socket !== socket) return;
+    const shouldReconnect = Boolean(
+      state.voice.desiredRoomId
+        && !state.voice.manualDisconnect
+        && (state.voice.joined || state.voice.joining || state.voice.reconnecting),
+    );
+    if (shouldReconnect) {
+      state.voice.socket = null;
+      state.voice.socketPromise = null;
+      beginVoiceReconnect();
+      return;
+    }
     const wasConnected = state.voice.joined || state.voice.joining;
     state.voice.socket = null;
     state.voice.socketPromise = null;
@@ -990,6 +1318,10 @@ async function joinVoice() {
   const requestedRoomId = state.activeRoomId;
   state.voice.joining = true;
   state.voice.roomId = requestedRoomId;
+  state.voice.desiredRoomId = requestedRoomId;
+  state.voice.manualDisconnect = false;
+  state.voice.reconnecting = false;
+  setConnectionState("voice", "reconnecting");
   renderVoiceControls();
 
   try {
@@ -1009,6 +1341,9 @@ async function joinVoice() {
     sendVoiceSocket({
       type: "join-voice",
       roomId: requestedRoomId,
+      muted: state.voice.muted,
+      cameraEnabled: state.voice.cameraEnabled,
+      screenSharing: state.voice.screenSharing,
     });
 
     setTimeout(() => {
@@ -1033,6 +1368,58 @@ function sendVoiceSocket(payload) {
   }
 }
 
+function normalizeVoiceParticipant(peer) {
+  return {
+    ...peer,
+    reconnecting: Boolean(peer.reconnecting || peer.disconnected),
+  };
+}
+
+function beginVoiceReconnect(delayMs = null) {
+  if (!state.voice.desiredRoomId) return;
+  closeAllVoicePeers();
+  state.voice.reconnecting = true;
+  state.voice.joining = false;
+  state.voice.joined = true;
+  setConnectionState("voice", state.browserOffline ? "offline" : "reconnecting");
+  renderVoiceControls();
+  renderVideoStage();
+  scheduleVoiceReconnect(delayMs);
+}
+
+function scheduleVoiceReconnect(delayMs = null) {
+  clearTimeout(state.voice.reconnectTimer);
+  const attempt = state.voice.reconnectAttempts;
+  const delay = delayMs ?? Math.min(1000 * (2 ** attempt), 8000);
+  state.voice.reconnectTimer = setTimeout(reconnectVoiceSocket, delay);
+}
+
+async function reconnectVoiceSocket() {
+  if (!state.voice.desiredRoomId || state.voice.manualDisconnect) return;
+  state.voice.reconnectAttempts += 1;
+  try {
+    await connectVoiceSocket();
+    sendVoiceSocket({
+      type: "join-voice",
+      roomId: state.voice.desiredRoomId,
+      muted: state.voice.muted,
+      cameraEnabled: state.voice.cameraEnabled,
+      screenSharing: state.voice.screenSharing,
+    });
+  } catch {
+    setConnectionState("voice", state.browserOffline ? "offline" : "reconnecting");
+    scheduleVoiceReconnect();
+  }
+}
+
+function syncVoiceStateToServer() {
+  sendVoiceSocket({
+    type: "voice-mute-state",
+    muted: state.voice.muted,
+  });
+  updateLocalMediaState();
+}
+
 async function handleVoiceSocketMessage(event) {
   let message;
   try {
@@ -1051,7 +1438,12 @@ async function handleVoiceSocketMessage(event) {
       state.voice.joined = true;
       state.voice.joining = false;
       state.voice.roomId = message.roomId;
+      state.voice.desiredRoomId = message.roomId;
       state.voice.selfPeerId = message.peerId;
+      state.voice.reconnecting = false;
+      state.voice.reconnectAttempts = 0;
+      clearTimeout(state.voice.reconnectTimer);
+      setConnectionState("voice", "connected");
       state.voice.participants.clear();
       state.voice.participants.set(message.peerId, {
         peerId: message.peerId,
@@ -1061,11 +1453,12 @@ async function handleVoiceSocketMessage(event) {
         screenSharing: state.voice.screenSharing,
       });
       for (const peer of message.peers || []) {
-        state.voice.participants.set(peer.peerId, peer);
+        state.voice.participants.set(peer.peerId, normalizeVoiceParticipant(peer));
       }
       renderVoiceControls();
       renderMembers();
       renderVideoStage();
+      syncVoiceStateToServer();
 
       for (const peer of message.peers || []) {
         await createVoiceOffer(peer);
@@ -1076,7 +1469,22 @@ async function handleVoiceSocketMessage(event) {
     if (message.roomId && message.roomId !== state.voice.roomId) return;
 
     if (message.type === "voice-peer-joined") {
-      state.voice.participants.set(message.peer.peerId, message.peer);
+      state.voice.participants.set(message.peer.peerId, normalizeVoiceParticipant(message.peer));
+      renderVoiceControls();
+      renderMembers();
+      renderVideoStage();
+      return;
+    }
+    if (message.type === "voice-peer-reconnected") {
+      state.voice.participants.set(message.peer.peerId, normalizeVoiceParticipant(message.peer));
+      renderVoiceControls();
+      renderMembers();
+      renderVideoStage();
+      return;
+    }
+    if (message.type === "voice-peer-reconnecting" || message.type === "voice-peer-paused") {
+      const peer = state.voice.participants.get(message.peerId);
+      if (peer) peer.reconnecting = true;
       renderVoiceControls();
       renderMembers();
       renderVideoStage();
@@ -1092,7 +1500,9 @@ async function handleVoiceSocketMessage(event) {
     }
     if (message.type === "voice-presence") {
       state.voice.participants = new Map(
-        (message.participants || []).map((peer) => [peer.peerId, peer]),
+        (message.participants || [])
+          .map(normalizeVoiceParticipant)
+          .map((peer) => [peer.peerId, peer]),
       );
       renderVoiceControls();
       renderMembers();
@@ -1160,6 +1570,7 @@ function ensureVoicePeer(peerId, user) {
     audio: null,
     remoteStream: new MediaStream(),
     videoSender: null,
+    reconnectTimer: null,
   };
   state.voice.peers.set(peerId, peer);
 
@@ -1207,7 +1618,11 @@ function ensureVoicePeer(peerId, user) {
   });
 
   connection.addEventListener("connectionstatechange", () => {
-    if (["failed", "closed"].includes(connection.connectionState)) {
+    if (["failed", "disconnected"].includes(connection.connectionState)) {
+      schedulePeerReconnect(peerId);
+      return;
+    }
+    if (connection.connectionState === "closed") {
       removeVoicePeer(peerId);
     }
   });
@@ -1244,9 +1659,31 @@ async function flushVoiceCandidates(peer) {
   }
 }
 
+function shouldInitiatePeerReconnect(peerId) {
+  return state.voice.selfPeerId && state.voice.selfPeerId > peerId;
+}
+
+function schedulePeerReconnect(peerId) {
+  const peer = state.voice.peers.get(peerId);
+  if (!peer || peer.reconnectTimer || !state.voice.joined) return;
+  peer.reconnectTimer = setTimeout(async () => {
+    const participant = state.voice.participants.get(peerId);
+    if (!participant || !state.voice.joined) return;
+    removeVoicePeer(peerId);
+    if (!shouldInitiatePeerReconnect(peerId)) return;
+    try {
+      await createVoiceOffer(participant);
+    } catch {
+      showToast("Medya bağlantısı yeniden deneniyor.", "error");
+      schedulePeerReconnect(peerId);
+    }
+  }, 2500);
+}
+
 function removeVoicePeer(peerId) {
   const peer = state.voice.peers.get(peerId);
   if (!peer) return;
+  clearTimeout(peer.reconnectTimer);
   peer.connection.close();
   peer.audio?.remove();
   state.voice.peers.delete(peerId);
@@ -1480,11 +1917,13 @@ function renderVideoStage() {
     const name = document.createElement("strong");
     name.textContent = isLocal ? `${participant.user.name} (sen)` : participant.user.name;
     const stateLabel = document.createElement("span");
-    stateLabel.textContent = participant.screenSharing
-      ? "Ekran paylaşıyor"
-      : participant.muted
-        ? "Mikrofon kapalı"
-        : "Mikrofon açık";
+    stateLabel.textContent = participant.reconnecting
+      ? "Yeniden bağlanıyor"
+      : participant.screenSharing
+        ? "Ekran paylaşıyor"
+        : participant.muted
+          ? "Mikrofon kapalı"
+          : "Mikrofon açık";
     footer.append(name, stateLabel);
     tile.append(footer);
     elements.videoGrid.append(tile);
@@ -1505,6 +1944,8 @@ function toggleVoiceMute() {
 }
 
 async function leaveVoice({ silent = false } = {}) {
+  state.voice.manualDisconnect = true;
+  state.voice.desiredRoomId = null;
   if (state.voice.joined || state.voice.joining) {
     sendVoiceSocket({ type: "leave-voice" });
   }
@@ -1513,6 +1954,7 @@ async function leaveVoice({ silent = false } = {}) {
 }
 
 function cleanupVoiceMedia() {
+  clearTimeout(state.voice.reconnectTimer);
   const cameraStream = state.voice.cameraStream;
   const screenStream = state.voice.screenStream;
   state.voice.cameraStream = null;
@@ -1529,7 +1971,11 @@ function cleanupVoiceMedia() {
   state.voice.selfPeerId = null;
   state.voice.joined = false;
   state.voice.joining = false;
+  state.voice.reconnecting = false;
+  state.voice.reconnectAttempts = 0;
+  state.voice.desiredRoomId = null;
   state.voice.muted = false;
+  setConnectionState("voice", "connected");
   renderVoiceControls();
   renderVideoStage();
   if (state.me) renderMembers();
@@ -1540,7 +1986,8 @@ function voiceParticipantForUser(userId) {
 }
 
 function renderVoiceControls() {
-  const activeInRoom = state.voice.joined && state.voice.roomId === state.activeRoomId;
+  const activeInRoom = (state.voice.joined || state.voice.reconnecting)
+    && state.voice.roomId === state.activeRoomId;
   const joiningRoom = state.voice.joining && state.voice.roomId === state.activeRoomId;
   elements.joinVoiceButton.classList.toggle("hidden", activeInRoom);
   elements.joinVoiceButton.disabled = joiningRoom || !state.activeRoomId;
@@ -1584,7 +2031,9 @@ function renderVoiceControls() {
     state.voice.muted ? "Mikrofonu aç" : "Mikrofonu kapat",
   );
 
-  if (joiningRoom) {
+  if (state.voice.reconnecting) {
+    elements.voiceStatus.textContent = "Yeniden bağlanıyor";
+  } else if (joiningRoom) {
     elements.voiceStatus.textContent = "Bağlanıyor";
   } else if (activeInRoom) {
     const count = state.voice.participants.size;
@@ -1596,8 +2045,28 @@ function renderVoiceControls() {
 
 function connectEvents() {
   if (state.eventSource) state.eventSource.close();
+  clearTimeout(state.eventReconnectTimer);
   const source = new EventSource("/api/events");
   state.eventSource = source;
+  const shouldRefreshAfterOpen = state.eventReconnectAttempts > 0;
+  setConnectionState("events", state.browserOffline ? "offline" : "reconnecting");
+
+  source.addEventListener("open", () => {
+    state.eventReconnectAttempts = 0;
+    setConnectionState("events", "connected");
+    if (shouldRefreshAfterOpen) {
+      refreshRooms()
+        .then(() => (state.activeRoomId ? selectRoom(state.activeRoomId) : null))
+        .catch(() => {});
+    }
+  });
+
+  source.addEventListener("error", () => {
+    setConnectionState("events", state.browserOffline ? "offline" : "reconnecting");
+    source.close();
+    if (state.eventSource === source) state.eventSource = null;
+    scheduleEventsReconnect();
+  });
 
   source.addEventListener("chat-message", (event) => {
     const message = JSON.parse(event.data);
@@ -1613,6 +2082,7 @@ function connectEvents() {
     const payload = JSON.parse(event.data);
     state.onlineUserIds = new Set(payload.onlineUserIds);
     renderMembers();
+    renderSocial();
   });
 
   source.addEventListener("rooms-updated", async () => {
@@ -1630,6 +2100,11 @@ function connectEvents() {
     renderMessages();
   });
 
+  source.addEventListener("friends-updated", async () => {
+    await refreshSocial();
+    if (state.activeProfile?.id) await openUserProfile({ id: state.activeProfile.id });
+  });
+
   source.addEventListener("typing", (event) => {
     const payload = JSON.parse(event.data);
     if (payload.roomId !== state.activeRoomId || payload.user.id === state.me.id) return;
@@ -1638,16 +2113,26 @@ function connectEvents() {
   });
 }
 
+function scheduleEventsReconnect(delayMs = null) {
+  if (!state.me) return;
+  clearTimeout(state.eventReconnectTimer);
+  const delay = delayMs ?? Math.min(1000 * (2 ** state.eventReconnectAttempts), 8000);
+  state.eventReconnectAttempts += 1;
+  state.eventReconnectTimer = setTimeout(connectEvents, delay);
+}
+
 async function refreshRooms() {
   try {
     const bootstrap = await api("/api/bootstrap");
     state.rooms = bootstrap.rooms;
     state.onlineUserIds = new Set(bootstrap.onlineUserIds);
+    applySocialState(bootstrap);
     if (!getActiveRoom()) {
       if (state.voice.roomId) await leaveVoice({ silent: true });
       state.activeRoomId = state.rooms[0]?.id || null;
     }
     renderRooms();
+    renderSocial();
     renderRoomHeader();
     renderMembers();
     renderVoiceControls();
@@ -1740,6 +2225,7 @@ async function logout() {
 
 function showAuthAfterLogout() {
   state.eventSource?.close();
+  clearTimeout(state.eventReconnectTimer);
   cleanupVoiceMedia();
   state.voice.socket?.close();
   state.voice.socket = null;
@@ -1748,6 +2234,10 @@ function showAuthAfterLogout() {
   state.me = null;
   state.rooms = [];
   state.messages = [];
+  state.friends = [];
+  state.incomingFriendRequests = [];
+  state.outgoingFriendRequests = [];
+  state.activeProfile = null;
   state.activeRoomId = null;
   window.location.reload();
 }

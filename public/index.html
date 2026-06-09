@@ -9,8 +9,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css?v=20260605-4">
-    <script src="/app.js?v=20260605-4" defer></script>
+    <link rel="stylesheet" href="/style.css?v=20260609-1">
+    <script src="/app.js?v=20260609-1" defer></script>
   </head>
   <body>
     <div id="toast-root" class="toast-root" aria-live="polite"></div>
@@ -150,6 +150,15 @@
           <nav id="room-list" class="room-list" aria-label="Sohbet odaları"></nav>
         </div>
 
+        <div class="social-section">
+          <div class="section-title">
+            <span>ARKADAŞLAR</span>
+            <strong id="friend-request-count" class="request-count hidden">0</strong>
+          </div>
+          <div id="friend-request-list" class="friend-request-list"></div>
+          <div id="friend-list" class="friend-list"></div>
+        </div>
+
         <div class="sidebar-profile">
           <button id="open-profile-button" class="profile-button" type="button" aria-label="Profilini aç">
             <div id="my-avatar" class="avatar avatar-medium"></div>
@@ -180,6 +189,10 @@
             </div>
           </div>
           <div class="header-actions">
+            <div id="connection-status" class="connection-status offline" role="status" aria-live="polite">
+              <span></span>
+              <strong>Çevrimdışı</strong>
+            </div>
             <button id="invite-button" class="primary-button">
               <svg viewBox="0 0 24 24"><path d="M15 19a6 6 0 0 0-12 0M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM19 8v6M16 11h6"></path></svg>
               Arkadaş davet et
@@ -318,10 +331,16 @@
         <div id="view-profile-avatar" class="avatar public-profile-avatar"></div>
         <span id="view-profile-status" class="public-profile-status"></span>
         <h2 id="view-profile-name">Kullanıcı</h2>
+        <p id="view-profile-relationship" class="public-profile-relationship"></p>
         <p id="view-profile-bio" class="public-profile-bio"></p>
+        <div id="view-profile-details" class="public-profile-details"></div>
         <div class="public-profile-id">
           <span>Kanka ID</span>
           <strong id="view-profile-kanka-id"></strong>
+        </div>
+        <div id="view-profile-actions" class="public-profile-actions">
+          <button id="profile-friend-action" class="primary-button wide" type="button">Arkadaş ekle</button>
+          <button id="profile-friend-secondary-action" class="secondary-button wide hidden" type="button">Reddet</button>
         </div>
       </section>
 
